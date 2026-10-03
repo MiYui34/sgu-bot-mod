@@ -1,0 +1,10 @@
+{
+	"required": true,
+	"package": "com.sgu.bridge.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"plugin": "com.sgu.bridge.SguMixinPlugin",
+	"mixins": ["PlayerCommandMixin"],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

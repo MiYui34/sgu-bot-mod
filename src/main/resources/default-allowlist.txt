@@ -1,0 +1,7 @@
+# 一行一条指令前缀。整行等于该前缀，或前缀后跟空格，才放行。
+# 默认只放行 list。需要更多指令时自行追加，例如：
+# whitelist list
+player
+carpet
+playerAction
+playerManager

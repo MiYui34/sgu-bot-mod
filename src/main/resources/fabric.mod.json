@@ -1,0 +1,23 @@
+{
+	"schemaVersion": 1,
+	"id": "sgu-bridge",
+	"version": "${version}",
+	"name": "SGU Bridge",
+	"description": "为 QQ 机器人和网页地图提供假人、下线、死亡和白名单指令接口。",
+	"authors": ["SGU"],
+	"license": "MIT",
+	"environment": "*",
+	"entrypoints": {
+		"main": ["com.sgu.bridge.SguBridge"]
+	},
+	"mixins": ["sgu-bridge.mixins.json"],
+	"depends": {
+		"fabricloader": ">=0.18.4",
+		"minecraft": "~26.1.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"carpet": "*"
+	}
+}
