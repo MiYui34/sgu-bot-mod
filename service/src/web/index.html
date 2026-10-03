@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>服务器地图</title>
+	<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+	<style>
+		:root { color-scheme: light; }
+		* { box-sizing: border-box; }
+		html, body { margin: 0; height: 100%; }
+		body {
+			display: flex;
+			flex-direction: column;
+			font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+			background: #d7d1c3;
+			color: #1d1a16;
+		}
+		header {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 12px;
+			align-items: center;
+			padding: 10px 14px;
+			background: #243024;
+			color: #f4f1e8;
+		}
+		header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+		select, button, input {
+			font: inherit;
+			background: #f4f1e8;
+			color: #1d1a16;
+			border: 0;
+			border-radius: 6px;
+			padding: 6px 10px;
+		}
+		#goto { display: flex; gap: 8px; align-items: center; }
+		#goto input { width: 7.5rem; }
+		#place, #status { font-size: 13px; opacity: 0.85; }
+		#status { margin-left: auto; }
+		#map { flex: 1; min-height: 0; background: #c8c2b4; }
+		.player-label {
+			background: rgba(29, 26, 22, 0.82);
+			color: white;
+			border: 0;
+			border-radius: 4px;
+			padding: 1px 4px;
+			font-size: 12px;
+		}
+		.leaflet-tooltip.player-label::before { display: none; }
+	</style>
+</head>
+<body>
+	<header>
+		<h1>服务器地图</h1>
+		<label>维度
+			<select id="dimension">
+				<option value="overworld">主世界</option>
+				<option value="nether">下界</option>
+				<option value="end">末地</option>
+			</select>
+		</label>
+		<form id="goto">
+			<label>X <input id="coord-x" name="x" inputmode="decimal" autocomplete="off" spellcheck="false"></label>
+			<label>Z <input id="coord-z" name="z" inputmode="decimal" autocomplete="off" spellcheck="false"></label>
+			<button type="submit">显示</button>
+		</form>
+		<button id="follow" type="button">回到玩家</button>
+		<span id="place"></span>
+		<span id="status">正在连接</span>
+	</header>
+	<div id="map"></div>
+	<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+	<script>
+		const dimensionIds = {
+			overworld: "minecraft:overworld",
+			nether: "minecraft:the_nether",
+			end: "minecraft:the_end",
+		};
+		const statusEl = document.querySelector("#status");
+		const dimensionEl = document.querySelector("#dimension");
+		const map = L.map("map", {
+			crs: L.extend({}, L.CRS.Simple, { transformation: new L.Transformation(1, 0, 1, 0) }),
+			minZoom: 0,
+			maxZoom: 0,
+			zoomControl: true,
+			attributionControl: true,
+		});
+		map.setView([0, 0], 0);
+		let revision = 0;
+		const markers = L.layerGroup().addTo(map);
+		const pins = L.layerGroup().addTo(map);
+		const placeEl = document.querySelector("#place");
+		let players = [];
+
+		function parseCoord(value) {
+			const text = String(value).trim().replace(/,/g, "");
+			if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(text)) {
+				return null;
+			}
+			const number = Number(text);
+			return Number.isFinite(number) ? number : null;
+		}
+
+		function formatCoord(value) {
+			if (Number.isInteger(value)) {
+				return String(value);
+			}
+			return String(Math.round(value * 10) / 10);
+		}
+
+		function showArea(x, z) {
+			map.setView([z, x], 0);
+			pins.clearLayers();
+			const marker = L.circleMarker([z, x], {
+				radius: 6,
+				color: "#8f1d18",
+				weight: 2,
+				fillColor: "#ffb4a8",
+				fillOpacity: 1,
+			});
+			marker.bindTooltip(`${formatCoord(x)}, ${formatCoord(z)}`, {
+				permanent: true,
+				direction: "right",
+				className: "player-label",
+				offset: [8, 0],
+			});
+			marker.addTo(pins);
+			placeEl.textContent = `X ${formatCoord(x)}  Z ${formatCoord(z)}`;
+		}
+
+		document.querySelector("#goto").addEventListener("submit", (event) => {
+			event.preventDefault();
+			const x = parseCoord(document.querySelector("#coord-x").value);
+			const z = parseCoord(document.querySelector("#coord-z").value);
+			if (x === null || z === null) {
+				placeEl.textContent = "请输入数字坐标";
+				return;
+			}
+			showArea(x, z);
+		});
+
+		function createLayer() {
+			return new (L.GridLayer.extend({
+				createTile(coords) {
+					const img = document.createElement("img");
+					img.alt = "";
+					img.src = `/tiles/${dimensionEl.value}/0/${coords.x}/${coords.y}.png?v=${revision}`;
+					return img;
+				},
+			}))({ tileSize: 256, noWrap: true });
+		}
+
+		let layer = createLayer();
+		layer.addTo(map);
+
+		dimensionEl.addEventListener("change", () => {
+			map.removeLayer(layer);
+			layer = createLayer();
+			layer.addTo(map);
+			drawPlayers();
+		});
+
+		function drawPlayers() {
+			markers.clearLayers();
+			const want = dimensionIds[dimensionEl.value];
+			for (const player of players) {
+				if (player.dimension !== want) continue;
+				const marker = L.circleMarker([player.z, player.x], {
+					radius: 6,
+					color: player.fake ? "#c47b2b" : "#1f6feb",
+					weight: 2,
+					fillColor: player.fake ? "#f0c37a" : "#8ec5ff",
+					fillOpacity: 1,
+				});
+				marker.bindTooltip(player.name, { permanent: true, direction: "top", className: "player-label", offset: [0, -8] });
+				marker.addTo(markers);
+			}
+		}
+
+		document.querySelector("#follow").addEventListener("click", () => {
+			const want = dimensionIds[dimensionEl.value];
+			const player = players.find((item) => item.dimension === want && !item.fake) || players.find((item) => item.dimension === want);
+			if (player) map.setView([player.z, player.x], 0);
+		});
+
+		let mapError = "";
+		function connect() {
+			const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+			socket.onopen = () => { if (!mapError) statusEl.textContent = "已连接"; };
+			socket.onclose = () => {
+				statusEl.textContent = "连接断开，正在重试";
+				setTimeout(connect, 2000);
+			};
+			socket.onmessage = (event) => {
+				const data = JSON.parse(event.data);
+				players = data.players || [];
+				drawPlayers();
+				if (!mapError) statusEl.textContent = data.error ? "模组未连接，地图仍可浏览" : "已连接";
+			};
+		}
+		connect();
+
+		async function pollMap() {
+			try {
+				const [changes, status] = await Promise.all([
+					fetch(`/api/map/changes?since=${revision}`).then((res) => res.json()),
+					fetch("/api/map/status").then((res) => res.json()),
+				]);
+				if (status.lastError) {
+					mapError = status.lastError;
+					statusEl.textContent = status.lastError;
+				} else {
+					mapError = "";
+				}
+				if (changes.revision !== revision && changes.tiles.length) {
+					revision = changes.revision;
+					layer.redraw();
+				} else {
+					revision = changes.revision;
+				}
+			} catch (error) {
+				statusEl.textContent = error.message;
+			}
+		}
+		setInterval(() => {
+			if (!document.hidden) {
+				pollMap();
+			}
+		}, 15000);
+		pollMap();
+	</script>
+</body>
+</html>

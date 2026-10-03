@@ -1,0 +1,14 @@
+{
+  "name": "sgu-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "lz4js": "^0.2.0",
+    "pngjs": "^7.0.0",
+    "ws": "^8.18.3"
+  }
+}

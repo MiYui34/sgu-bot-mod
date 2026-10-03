@@ -3,3 +3,6 @@ build/
 run/
 .idea/
 *.iml
+service/node_modules/
+service/data/
+service/.env
