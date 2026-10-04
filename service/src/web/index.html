@@ -85,6 +85,7 @@
 			maxZoom: 0,
 			zoomControl: true,
 			attributionControl: true,
+			fadeAnimation: false,
 		});
 		map.setView([0, 0], 0);
 		let revision = 0;
@@ -143,18 +144,117 @@
 		function createLayer() {
 			return new (L.GridLayer.extend({
 				createTile(coords) {
-					const img = document.createElement("img");
-					img.alt = "";
-					img.src = `/tiles/${dimensionEl.value}/0/${coords.x}/${coords.y}.png?v=${revision}`;
-					return img;
+					const canvas = document.createElement("canvas");
+					canvas.width = 256;
+					canvas.height = 256;
+					paintCanvas(canvas, `/tiles/${dimensionEl.value}/0/${coords.x}/${coords.y}.webp?v=${revision}`);
+					return canvas;
 				},
 			}))({ tileSize: 256, noWrap: true });
+		}
+
+		const swapQueue = [];
+		const readySwaps = [];
+		let decoding = 0;
+		let framePending = false;
+
+		function paintCanvas(canvas, url) {
+			if (canvas.dataset.shown === url || canvas.dataset.next === url) return;
+			canvas.dataset.next = url;
+			const queued = swapQueue.find((item) => item.canvas === canvas);
+			if (queued) {
+				queued.url = url;
+				return;
+			}
+			swapQueue.push({ canvas, url });
+			pumpSwaps();
+		}
+
+		function pumpSwaps() {
+			while (decoding < 4 && swapQueue.length) {
+				const job = swapQueue.shift();
+				decoding += 1;
+				decodeSwap(job).then((ready) => {
+					decoding -= 1;
+					if (ready) readySwaps.push(ready);
+					scheduleFrame();
+					pumpSwaps();
+				});
+			}
+		}
+
+		function scheduleFrame() {
+			if (framePending || readySwaps.length === 0) return;
+			framePending = true;
+			requestAnimationFrame(() => {
+				framePending = false;
+				const item = readySwaps.shift();
+				if (item) commitSwap(item);
+				if (readySwaps.length) scheduleFrame();
+			});
+		}
+
+		async function decodeSwap(job) {
+			const url = job.url;
+			try {
+				const response = await fetch(url);
+				if (!response.ok) throw new Error("图块加载失败");
+				const blob = await response.blob();
+				if (job.canvas.dataset.next !== url) return null;
+				let bitmap = null;
+				try {
+					bitmap = await createImageBitmap(blob);
+				} catch {
+					const image = new Image();
+					const objectUrl = URL.createObjectURL(blob);
+					image.src = objectUrl;
+					await image.decode();
+					URL.revokeObjectURL(objectUrl);
+					bitmap = image;
+				}
+				if (job.canvas.dataset.next !== url) {
+					bitmap.close?.();
+					return null;
+				}
+				return { canvas: job.canvas, url, bitmap };
+			} catch {
+				if (job.canvas.dataset.next === url) delete job.canvas.dataset.next;
+				return null;
+			}
+		}
+
+		function commitSwap(item) {
+			if (item.canvas.dataset.next !== item.url) {
+				item.bitmap.close?.();
+				return;
+			}
+			item.canvas.getContext("2d").drawImage(item.bitmap, 0, 0);
+			item.bitmap.close?.();
+			item.canvas.dataset.shown = item.url;
+			delete item.canvas.dataset.next;
+		}
+
+		function refreshTiles(paths) {
+			const dim = dimensionEl.value;
+			const seen = new Set();
+			for (const path of paths) {
+				const parts = path.split("/");
+				if (parts.length !== 4 || parts[0] !== dim || parts[1] !== "0" || seen.has(path)) {
+					continue;
+				}
+				seen.add(path);
+				const tile = layer._tiles?.[`${parts[2]}:${parts[3]}:0`];
+				if (!tile?.el) continue;
+				paintCanvas(tile.el, `/tiles/${path}.webp?v=${revision}`);
+			}
 		}
 
 		let layer = createLayer();
 		layer.addTo(map);
 
 		dimensionEl.addEventListener("change", () => {
+			swapQueue.length = 0;
+			readySwaps.length = 0;
 			map.removeLayer(layer);
 			layer = createLayer();
 			layer.addTo(map);
@@ -213,11 +313,10 @@
 				} else {
 					mapError = "";
 				}
-				if (changes.revision !== revision && changes.tiles.length) {
-					revision = changes.revision;
-					layer.redraw();
-				} else {
-					revision = changes.revision;
+				const previous = revision;
+				revision = changes.revision;
+				if (changes.revision !== previous && changes.tiles.length) {
+					refreshTiles(changes.tiles);
 				}
 			} catch (error) {
 				statusEl.textContent = error.message;
@@ -227,7 +326,7 @@
 			if (!document.hidden) {
 				pollMap();
 			}
-		}, 15000);
+		}, 400);
 		pollMap();
 	</script>
 </body>

@@ -7,8 +7,8 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@jsquash/webp": "^1.5.0",
     "lz4js": "^0.2.0",
-    "pngjs": "^7.0.0",
     "ws": "^8.18.3"
   }
 }

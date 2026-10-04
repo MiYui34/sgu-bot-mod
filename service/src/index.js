@@ -5,6 +5,7 @@ import { createBridge } from "./bridge.js";
 import { createHandler } from "./bot/handle.js";
 import { groupAllowed, loadConfig } from "./config.js";
 import { startHttp } from "./http.js";
+import { syncRegions } from "./map/sync.js";
 import { createMap } from "./map/tiles.js";
 import { createQq } from "./qq/client.js";
 import { startGateway } from "./qq/gateway.js";
@@ -25,12 +26,45 @@ const handle = createHandler({
 const sequences = new Map();
 const recentReplies = new Map();
 
+let lastRefresh = 0;
+let refreshing = false;
+let regionSyncUnsupported = false;
+
 setInterval(() => {
-	if (!map.watching()) {
+	if (!map.watching() || refreshing || Date.now() - lastRefresh < 300000) {
 		return;
 	}
-	map.poll().catch((error) => console.error(`地图扫描失败：${error.message}`));
-}, 300000);
+	refreshing = true;
+	lastRefresh = Date.now();
+	refreshMap().catch((error) => {
+		console.error(`地图同步失败：${error.message}`);
+		lastRefresh = Date.now() - 240000;
+	}).finally(() => {
+		refreshing = false;
+	});
+}, 5000);
+
+async function refreshMap() {
+	if (!regionSyncUnsupported) {
+		try {
+			const result = await syncRegions(bridge, config.worldPath);
+			for (const file of result.files) {
+				map.notifyRegionFile(file.dim, file.name);
+			}
+			if (result.updated > 0) {
+				console.log(`区域同步：写入 ${result.updated} 个文件，${result.bytes} 字节`);
+			}
+		} catch (error) {
+			if (error.status === 404) {
+				regionSyncUnsupported = true;
+				console.error("模组没有区域同步接口，请换成新的 sgu-bridge");
+			} else {
+				throw error;
+			}
+		}
+	}
+	await map.poll();
+}
 
 const httpServer = await startHttp({ map, bridge, port: config.httpPort });
 console.log(`网页地图 http://127.0.0.1:${httpServer.port}/`);

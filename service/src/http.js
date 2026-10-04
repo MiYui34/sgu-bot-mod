@@ -28,12 +28,12 @@ export async function startHttp({ map, bridge, port }) {
 					return json(res, { players: [], error: error.message });
 				}
 			}
-			const tile = /^\/tiles\/(overworld|nether|end)\/0\/(-?\d+)\/(-?\d+)\.png$/.exec(url.pathname);
+			const tile = /^\/tiles\/(overworld|nether|end)\/0\/(-?\d+)\/(-?\d+)\.webp$/.exec(url.pathname);
 			if (tile) {
 				map.watch();
 				try {
 					const body = await map.tile(tile[1], Number(tile[2]), Number(tile[3]));
-					res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "no-cache" });
+					res.writeHead(200, { "Content-Type": "image/webp", "Cache-Control": "no-cache" });
 					res.end(body);
 					return;
 				} catch (error) {

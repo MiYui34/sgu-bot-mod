@@ -1,14 +1,11 @@
-import { mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { PNG } from "pngjs";
-import { chunkCoords, parseRegionName, readRegionChunks } from "./anvil.js";
-import { chunkToTile, surfaceColors } from "./colors.js";
+import { chunkCoords, parseRegionName } from "./anvil.js";
+import { encodeLosslessWebp } from "./webp.js";
+import { renderInPool } from "./pool.js";
+import { DIMENSIONS } from "./render.js";
 
-export const DIMENSIONS = {
-	overworld: ["dimensions", "minecraft", "overworld", "region"],
-	nether: ["dimensions", "minecraft", "the_nether", "region"],
-	end: ["dimensions", "minecraft", "the_end", "region"],
-};
+export { DIMENSIONS };
 
 const TILE = 256;
 
@@ -16,11 +13,14 @@ export function createMap(options) {
 	const worldPath = options.worldPath;
 	const cacheDir = options.cacheDir;
 	const dirty = new Set();
+	const emptyTiles = new Set();
+	const inflight = new Map();
 	const state = { files: {} };
 	let revision = 0;
 	const changes = [];
 	let lastError = "";
 	let watchedUntil = 0;
+	let regionGeneration = 0;
 
 	function noteChange(dim, tileX, tileZ) {
 		revision += 1;
@@ -35,6 +35,7 @@ export function createMap(options) {
 	}
 
 	async function poll() {
+		const updatedTiles = new Set();
 		for (const dim of Object.keys(DIMENSIONS)) {
 			const dir = path.join(worldPath, ...DIMENSIONS[dim]);
 			let names = [];
@@ -86,6 +87,13 @@ export function createMap(options) {
 						}
 						const coords = chunkCoords(region.regionX, region.regionZ, index);
 						dirty.add(`${dim}:${coords.chunkX}:${coords.chunkZ}`);
+						const place = chunkToTile(coords.chunkX, coords.chunkZ, TILE);
+						updatedTiles.add(`${dim}/${place.tileX}/${place.tileZ}`);
+					}
+				}
+				for (const tileKey of regionTileKeys(dim, region.regionX, region.regionZ)) {
+					if (emptyTiles.delete(tileKey)) {
+						updatedTiles.add(tileKey);
 					}
 				}
 				state.files[key] = { mtime, stamps };
@@ -96,88 +104,85 @@ export function createMap(options) {
 				}
 			}
 		}
+		for (const key of updatedTiles) {
+			const [dim, tileX, tileZ] = key.split("/");
+			noteChange(dim, Number(tileX), Number(tileZ));
+		}
 	}
 
 	async function tile(dim, tileX, tileZ) {
 		if (!DIMENSIONS[dim]) {
 			throw new Error("未知维度");
 		}
-		const filePath = path.join(cacheDir, dim, "0", String(tileX), `${tileZ}.png`);
+		const key = `${dim}/${tileX}/${tileZ}`;
+		const filePath = path.join(cacheDir, dim, "0", String(tileX), `${tileZ}.webp`);
 		const chunks = chunksForTile(tileX, tileZ);
 		const needs = chunks.some((chunk) => dirty.has(`${dim}:${chunk.chunkX}:${chunk.chunkZ}`));
 		if (!needs) {
+			if (emptyTiles.has(key)) {
+				return blankTile();
+			}
 			try {
 				return await readFile(filePath);
 			} catch {
-				// 缓存还没有这张图，下面现画。
+				// 缓存还没有这张图，下面安排绘制。
 			}
 		}
-		return limit(() => paintTile(dim, tileX, tileZ, filePath, chunks));
+		if (!inflight.has(key)) {
+			const job = paintTile(dim, tileX, tileZ, filePath, chunks)
+				.catch((error) => {
+					lastError = error.message;
+				})
+				.finally(() => inflight.delete(key));
+			inflight.set(key, job);
+		}
+		try {
+			return await readFile(filePath);
+		} catch {
+			return blankTile();
+		}
+	}
+
+	function notifyRegionFile(dim, name) {
+		const match = /^r\.(-?\d+)\.(-?\d+)\.mca$/.exec(name);
+		if (!match || !DIMENSIONS[dim]) {
+			return;
+		}
+		regionGeneration += 1;
+		for (const key of regionTileKeys(dim, Number(match[1]), Number(match[2]))) {
+			emptyTiles.delete(key);
+			const [, tileX, tileZ] = key.split("/");
+			noteChange(dim, Number(tileX), Number(tileZ));
+		}
 	}
 
 	async function paintTile(dim, tileX, tileZ, filePath, chunks) {
-		const png = new PNG({ width: TILE, height: TILE });
-		let painted = false;
-		const grouped = new Map();
+		const generation = regionGeneration;
 		for (const chunk of chunks) {
 			dirty.delete(`${dim}:${chunk.chunkX}:${chunk.chunkZ}`);
-			const regionX = Math.floor(chunk.chunkX / 32);
-			const regionZ = Math.floor(chunk.chunkZ / 32);
-			const localX = chunk.chunkX - regionX * 32;
-			const localZ = chunk.chunkZ - regionZ * 32;
-			const file = path.join(worldPath, ...DIMENSIONS[dim], `r.${regionX}.${regionZ}.mca`);
-			let group = grouped.get(file);
-			if (!group) {
-				group = [];
-				grouped.set(file, group);
-			}
-			group.push({ chunk, index: localX + localZ * 32, regionX, regionZ });
 		}
-		for (const [file, group] of grouped) {
-			try {
-				await stat(file);
-			} catch {
-				continue;
+		const rendered = await renderInPool({ worldPath, dim, chunks });
+		if (!rendered.painted || !rendered.body) {
+			if (generation === regionGeneration) {
+				emptyTiles.add(`${dim}/${tileX}/${tileZ}`);
 			}
-			let decoded;
-			try {
-				decoded = await readRegionChunks(file, group.map((item) => item.index));
-			} catch (error) {
-				const sample = group[0];
-				lastError = `${dim} r.${sample.regionX}.${sample.regionZ}.mca：${error.message}`;
+			return blankTile();
+		}
+		const body = Buffer.isBuffer(rendered.body) ? rendered.body : Buffer.from(rendered.body);
+		emptyTiles.delete(`${dim}/${tileX}/${tileZ}`);
+		await mkdir(path.dirname(filePath), { recursive: true });
+		const temporary = `${filePath}.${process.pid}.tmp`;
+		await writeFile(temporary, body);
+		try {
+			await rename(temporary, filePath);
+		} catch (error) {
+			if (error.code !== "EPERM" && error.code !== "EEXIST") {
 				throw error;
 			}
-			for (const item of group) {
-				const root = decoded.get(item.index);
-				if (!root) {
-					continue;
-				}
-				const colors = surfaceColors(root);
-				painted = true;
-				const place = chunkToTile(item.chunk.chunkX, item.chunk.chunkZ, TILE);
-				for (let z = 0; z < 16; z++) {
-					for (let x = 0; x < 16; x++) {
-						const color = colors[z * 16 + x];
-						if (!color) {
-							continue;
-						}
-						const px = place.pixelX + x;
-						const py = place.pixelZ + z;
-						const i = (png.width * py + px) << 2;
-						png.data[i] = color[0];
-						png.data[i + 1] = color[1];
-						png.data[i + 2] = color[2];
-						png.data[i + 3] = color[3];
-					}
-				}
-			}
+			await rm(filePath, { force: true });
+			await rename(temporary, filePath);
 		}
-		const body = PNG.sync.write(png);
-		if (painted) {
-			await mkdir(path.dirname(filePath), { recursive: true });
-			await writeFile(filePath, body);
-			noteChange(dim, tileX, tileZ);
-		}
+		noteChange(dim, tileX, tileZ);
 		return body;
 	}
 
@@ -188,6 +193,7 @@ export function createMap(options) {
 		},
 		poll,
 		tile,
+		notifyRegionFile,
 		status() {
 			return {
 				worldPath,
@@ -205,6 +211,20 @@ export function createMap(options) {
 	};
 }
 
+function regionTileKeys(dim, regionX, regionZ) {
+	const chunksPerTile = TILE / 16;
+	const tileX0 = Math.floor((regionX * 32) / chunksPerTile);
+	const tileZ0 = Math.floor((regionZ * 32) / chunksPerTile);
+	const span = 32 / chunksPerTile;
+	const keys = [];
+	for (let dz = 0; dz < span; dz++) {
+		for (let dx = 0; dx < span; dx++) {
+			keys.push(`${dim}/${tileX0 + dx}/${tileZ0 + dz}`);
+		}
+	}
+	return keys;
+}
+
 function chunksForTile(tileX, tileZ) {
 	const chunks = [];
 	const chunkX0 = tileX * (TILE / 16);
@@ -217,24 +237,14 @@ function chunksForTile(tileX, tileZ) {
 	return chunks;
 }
 
-let activePaints = 0;
-const paintQueue = [];
+let blankPromise;
 
-function limit(task) {
-	return new Promise((resolve, reject) => {
-		paintQueue.push({ task, resolve, reject });
-		pumpPaints();
-	});
-}
-
-function pumpPaints() {
-	if (activePaints >= 1 || paintQueue.length === 0) {
-		return;
+function blankTile() {
+	if (!blankPromise) {
+		blankPromise = encodeLosslessWebp(new Uint8ClampedArray(TILE * TILE * 4), TILE, TILE).catch((error) => {
+			blankPromise = null;
+			throw error;
+		});
 	}
-	activePaints += 1;
-	const job = paintQueue.shift();
-	job.task().then(job.resolve, job.reject).finally(() => {
-		activePaints -= 1;
-		pumpPaints();
-	});
+	return blankPromise;
 }

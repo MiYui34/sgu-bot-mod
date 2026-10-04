@@ -24,6 +24,20 @@ export function createBridge(config, fetchImpl = fetch) {
 		return data;
 	}
 
+	async function openRegion(dim, name) {
+		const response = await fetchImpl(`${config.bridgeUrl}/v1/regions/${dim}/${encodeURIComponent(name)}`, {
+			headers: {
+				Authorization: `Bearer ${config.bridgeToken}`,
+			},
+		});
+		if (!response.ok) {
+			const error = new Error(`区域文件 ${response.status}`);
+			error.status = response.status;
+			throw error;
+		}
+		return response;
+	}
+
 	return {
 		health: () => request("GET", "/v1/health"),
 		fakePlayers: () => request("GET", "/v1/fake-players"),
@@ -32,5 +46,7 @@ export function createBridge(config, fetchImpl = fetch) {
 		lastDeath: (name) => request("GET", `/v1/players/last-death?name=${encodeURIComponent(name)}`),
 		killFake: (name) => request("POST", `/v1/fake-players/${encodeURIComponent(name)}/kill`),
 		command: (command) => request("POST", "/v1/commands", { command }),
+		regions: () => request("GET", "/v1/regions"),
+		openRegion,
 	};
 }

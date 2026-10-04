@@ -4,6 +4,7 @@ import com.sgu.bridge.http.BridgeHttp;
 import com.sgu.bridge.store.RecordStore;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.storage.LevelResource;
 
 import java.nio.file.Path;
 
@@ -13,6 +14,7 @@ public final class BridgeRuntime {
 	private BridgeHttp http;
 	private Path directory;
 	private volatile MinecraftServer server;
+	private volatile Path worldRoot;
 
 	public void load() {
 		directory = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("sgu-bridge");
@@ -24,10 +26,12 @@ public final class BridgeRuntime {
 
 	public void attach(MinecraftServer server) {
 		this.server = server;
+		this.worldRoot = server.getWorldPath(LevelResource.ROOT);
 	}
 
 	public void detach() {
 		this.server = null;
+		this.worldRoot = null;
 	}
 
 	public void reconcileFakePlayers() {
@@ -44,6 +48,10 @@ public final class BridgeRuntime {
 
 	public MinecraftServer server() {
 		return server;
+	}
+
+	public Path worldRoot() {
+		return worldRoot;
 	}
 
 	public BridgeConfig config() {

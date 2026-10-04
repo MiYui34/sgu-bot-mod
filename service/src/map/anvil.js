@@ -1,6 +1,6 @@
 import { deflateSync } from "node:zlib";
-import { open, readFile } from "node:fs/promises";
-import { decodeNbt, decompressChunk } from "./nbt.js";
+import { readFile, stat } from "node:fs/promises";
+import { decompressChunk, readMapChunk } from "./nbt.js";
 
 const SECTOR = 4096;
 
@@ -38,85 +38,103 @@ export function readTimestamps(buffer) {
 	return stamps;
 }
 
-export async function readChunkNbt(file, index) {
-	const handle = await open(file, "r");
-	try {
-		const header = Buffer.alloc(8192);
-		const headerRead = await handle.read(header, 0, 8192, 0);
-		if (headerRead.bytesRead < 8192) {
-			return null;
-		}
-		const location = header.readUInt32BE(index * 4);
-		if (location === 0) {
-			return null;
-		}
-		const sector = location >> 8;
-		const lengthBuf = Buffer.alloc(5);
-		await handle.read(lengthBuf, 0, 5, sector * SECTOR);
-		const length = lengthBuf.readUInt32BE(0);
-		const compression = lengthBuf[4];
-		if (length <= 1) {
-			return null;
-		}
-		const payload = Buffer.alloc(length - 1);
-		await handle.read(payload, 0, payload.length, sector * SECTOR + 5);
-		const nbt = await decompressChunk(compression, payload);
-		return decodeNbt(nbt);
-	} finally {
-		await handle.close();
-	}
-}
-
 const MAX_CHUNK = 4 * 1024 * 1024;
+const regionCache = new Map();
+const regionLoads = new Map();
 
-export async function readRegionChunks(file, indexes) {
-	const handle = await open(file, "r");
-	try {
-		const header = Buffer.alloc(8192);
-		const headerRead = await handle.read(header, 0, 8192, 0);
-		const found = new Map();
-		if (headerRead.bytesRead < 8192) {
-			return found;
-		}
-		for (const index of indexes) {
-			const location = header.readUInt32BE(index * 4);
-			if (location === 0) {
-				found.set(index, null);
-				continue;
-			}
-			const sector = location >> 8;
-			const lengthBuf = Buffer.alloc(5);
-			await handle.read(lengthBuf, 0, 5, sector * SECTOR);
-			const length = lengthBuf.readUInt32BE(0);
-			const compression = lengthBuf[4];
-			if (length <= 1 || length > MAX_CHUNK) {
-				throw new Error(`区块长度异常 ${length}`);
-			}
-			const payload = Buffer.alloc(length - 1);
-			await handle.read(payload, 0, payload.length, sector * SECTOR + 5);
-			const nbt = await decompressChunk(compression, payload);
-			found.set(index, decodeNbt(nbt));
-		}
-		return found;
-	} finally {
-		await handle.close();
-	}
+export async function readChunkNbt(file, index, minY = -64) {
+	return chunkFromRegion(await regionBuffer(file), index, minY);
 }
 
-export async function readChunkNbtFromBuffer(buffer, index) {
-	if (buffer.length < 8192) {
+export async function readRegionChunks(file, indexes, minY = -64) {
+	const buffer = await regionBuffer(file);
+	const found = new Map();
+	const jobs = [];
+	for (const index of indexes) {
+		const located = locateChunk(buffer, index);
+		if (!located) {
+			found.set(index, null);
+			continue;
+		}
+		jobs.push({ index, ...located });
+	}
+	for (let start = 0; start < jobs.length; start += 4) {
+		const batch = jobs.slice(start, start + 4);
+		const decoded = await Promise.all(batch.map(async (job) => readMapChunk(await decompressChunk(job.compression, job.payload), minY)));
+		for (let index = 0; index < batch.length; index++) {
+			found.set(batch[index].index, decoded[index]);
+		}
+	}
+	return found;
+}
+
+export async function readChunkNbtFromBuffer(buffer, index, minY = -64) {
+	return chunkFromRegion(buffer, index, minY);
+}
+
+async function chunkFromRegion(buffer, index, minY) {
+	const located = locateChunk(buffer, index);
+	if (!located) {
+		return null;
+	}
+	return readMapChunk(await decompressChunk(located.compression, located.payload), minY);
+}
+
+function locateChunk(buffer, index) {
+	if (!buffer || buffer.length < 8192 || index < 0 || index > 1023) {
 		return null;
 	}
 	const location = buffer.readUInt32BE(index * 4);
 	if (location === 0) {
 		return null;
 	}
-	const sector = location >> 8;
-	const offset = sector * SECTOR;
+	const offset = (location >>> 8) * SECTOR;
+	if (offset + 5 > buffer.length) {
+		throw new Error("区块超出区域文件");
+	}
 	const length = buffer.readUInt32BE(offset);
 	const compression = buffer[offset + 4];
-	const payload = buffer.subarray(offset + 5, offset + 4 + length);
-	return decodeNbt(await decompressChunk(compression, payload));
+	if (length <= 1 || length > MAX_CHUNK) {
+		throw new Error(`区块长度异常 ${length}`);
+	}
+	const end = offset + 4 + length;
+	if (end > buffer.length) {
+		throw new Error("区块超出区域文件");
+	}
+	return { compression, payload: buffer.subarray(offset + 5, end) };
+}
+
+async function regionBuffer(file) {
+	const pending = regionLoads.get(file);
+	if (pending) {
+		return pending;
+	}
+	const job = loadRegion(file).finally(() => regionLoads.delete(file));
+	regionLoads.set(file, job);
+	return job;
+}
+
+async function loadRegion(file) {
+	const info = await stat(file);
+	const cached = regionCache.get(file);
+	if (cached && cached.mtime === info.mtimeMs && cached.size === info.size) {
+		cached.used = Date.now();
+		return cached.buffer;
+	}
+	const buffer = await readFile(file);
+	regionCache.set(file, { mtime: info.mtimeMs, size: info.size, buffer, used: Date.now() });
+	while (regionCache.size > 6) {
+		let oldestKey = null;
+		let oldestUsed = Infinity;
+		for (const [key, value] of regionCache) {
+			if (value.used < oldestUsed) {
+				oldestUsed = value.used;
+				oldestKey = key;
+			}
+		}
+		regionCache.delete(oldestKey);
+	}
+	return buffer;
 }
 
 export function writeTestRegion(chunks) {

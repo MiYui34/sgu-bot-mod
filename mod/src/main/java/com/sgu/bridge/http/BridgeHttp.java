@@ -6,6 +6,7 @@ import com.sgu.bridge.BridgeRuntime;
 import com.sgu.bridge.CommandGuard;
 import com.sgu.bridge.FakePlayers;
 import com.sgu.bridge.SguBridge;
+import com.sgu.bridge.world.RegionFiles;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import net.minecraft.commands.CommandSource;
@@ -19,15 +20,24 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class BridgeHttp {
+	private static final Pattern REGION_FILE = Pattern.compile("^/v1/regions/(overworld|nether|end)/(r\\.-?\\d+\\.-?\\d+\\.mca)$");
+
 	private final BridgeRuntime runtime;
 	private HttpServer server;
+	private ExecutorService executor;
 
 	public BridgeHttp(BridgeRuntime runtime) {
 		this.runtime = runtime;
@@ -45,7 +55,12 @@ public final class BridgeHttp {
 			return;
 		}
 		server.createContext("/", this::handle);
-		server.setExecutor(null);
+		executor = Executors.newFixedThreadPool(2, runnable -> {
+			Thread thread = new Thread(runnable, "sgu-bridge-http");
+			thread.setDaemon(true);
+			return thread;
+		});
+		server.setExecutor(executor);
 		server.start();
 		SguBridge.LOGGER.info("本机接口已监听 http://127.0.0.1:{}/", port);
 	}
@@ -54,6 +69,10 @@ public final class BridgeHttp {
 		if (server != null) {
 			server.stop(0);
 			server = null;
+		}
+		if (executor != null) {
+			executor.shutdownNow();
+			executor = null;
 		}
 	}
 
@@ -69,6 +88,10 @@ public final class BridgeHttp {
 				JsonObject body = new JsonObject();
 				body.addProperty("ok", true);
 				send(exchange, 200, body.toString());
+				return;
+			}
+			if ("GET".equals(method) && (path.equals("/v1/regions") || path.startsWith("/v1/regions/"))) {
+				serveRegions(exchange, path);
 				return;
 			}
 			JsonObject body = call(path, method, exchange);
@@ -255,6 +278,47 @@ public final class BridgeHttp {
 			output.append(e.getMessage() == null ? e.toString() : e.getMessage());
 		}
 		return output.toString();
+	}
+
+	private void serveRegions(HttpExchange exchange, String path) throws IOException {
+		Path root = runtime.worldRoot();
+		if (root == null) {
+			send(exchange, 503, error("世界目录还没准备好").toString());
+			return;
+		}
+		if ("/v1/regions".equals(path)) {
+			JsonObject body = new JsonObject();
+			var files = new com.google.gson.JsonArray();
+			for (RegionFiles.Listed file : RegionFiles.list(root)) {
+				JsonObject row = new JsonObject();
+				row.addProperty("dim", file.dim());
+				row.addProperty("name", file.name());
+				row.addProperty("size", file.size());
+				row.addProperty("mtime", file.mtime());
+				files.add(row);
+			}
+			body.add("files", files);
+			send(exchange, 200, body.toString());
+			return;
+		}
+		Matcher matcher = REGION_FILE.matcher(path);
+		if (!matcher.matches()) {
+			send(exchange, 404, error("未找到").toString());
+			return;
+		}
+		Path file;
+		try {
+			file = RegionFiles.resolve(root, matcher.group(1), matcher.group(2));
+		} catch (IOException e) {
+			send(exchange, 404, error("未找到").toString());
+			return;
+		}
+		long size = Files.size(file);
+		exchange.getResponseHeaders().set("Content-Type", "application/octet-stream");
+		exchange.sendResponseHeaders(200, size);
+		try (OutputStream out = exchange.getResponseBody()) {
+			Files.copy(file, out);
+		}
 	}
 
 	private boolean authorized(HttpExchange exchange) {

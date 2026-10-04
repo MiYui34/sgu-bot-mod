@@ -1,4 +1,8 @@
-import { inflateSync, gunzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gunzip, inflate } from "node:zlib";
+
+const gunzipAsync = promisify(gunzip);
+const inflateAsync = promisify(inflate);
 
 const END = 0;
 const BYTE = 1;
@@ -187,15 +191,404 @@ export const tags = {
 	string: (value) => ({ type: STRING, value }),
 	compound: (value) => ({ type: COMPOUND, value }),
 	list: (listType, value) => ({ type: LIST, listType, value }),
+	long: (value) => ({ type: LONG, value }),
 	longArray: (value) => ({ type: LONG_ARRAY, value }),
 };
 
+const SHIFT64 = Array.from({ length: 64 }, (_, index) => BigInt(index));
+const MASKS = Array.from({ length: 33 }, (_, bits) => (1n << BigInt(bits)) - 1n);
+
+function bitsForSamples(count, samples) {
+	for (let bits = 1; bits <= 32; bits++) {
+		const valuesPerLong = Math.floor(64 / bits);
+		if (Math.ceil(samples / valuesPerLong) === count) {
+			return bits;
+		}
+	}
+	return 0;
+}
+
+export function packedIndex(longs, bits, index) {
+	const valuesPerLong = Math.floor(64 / bits);
+	const longIndex = Math.floor(index / valuesPerLong);
+	const offset = (index - longIndex * valuesPerLong) * bits;
+	const value = longs[longIndex] ?? 0n;
+	return Number((value >> SHIFT64[offset]) & MASKS[bits]);
+}
+
+export function heightmapColumns(longs, minY) {
+	const bits = bitsForSamples(longs.length, 256);
+	if (!bits) {
+		return null;
+	}
+	const columns = new Int16Array(256);
+	const sections = new Set();
+	for (let index = 0; index < 256; index++) {
+		const stored = packedIndex(longs, bits, index);
+		if (stored <= 0) {
+			columns[index] = -32768;
+			continue;
+		}
+		const blockY = stored + minY - 1;
+		if (blockY < -32768 || blockY > 32767) {
+			columns[index] = -32768;
+			continue;
+		}
+		columns[index] = blockY;
+		sections.add(Math.floor(blockY / 16));
+	}
+	return { columns, sections };
+}
+
+function skipAt(buffer, offset, tag) {
+	function need(size) {
+		if (offset + size > buffer.length) {
+			throw new Error("NBT 超出文件末尾");
+		}
+	}
+	switch (tag) {
+		case END:
+			return offset;
+		case BYTE:
+			need(1);
+			return offset + 1;
+		case SHORT:
+			need(2);
+			return offset + 2;
+		case INT:
+		case FLOAT:
+			need(4);
+			return offset + 4;
+		case LONG:
+		case DOUBLE:
+			need(8);
+			return offset + 8;
+		case BYTE_ARRAY: {
+			need(4);
+			const length = buffer.readInt32BE(offset);
+			if (length < 0) {
+				throw new Error("NBT 长度异常");
+			}
+			need(4 + length);
+			return offset + 4 + length;
+		}
+		case STRING: {
+			need(2);
+			const length = buffer.readUInt16BE(offset);
+			need(2 + length);
+			return offset + 2 + length;
+		}
+		case LIST: {
+			need(5);
+			const listType = buffer[offset];
+			const length = buffer.readInt32BE(offset + 1);
+			offset += 5;
+			if (length < 0 || length > 1_000_000) {
+				throw new Error("NBT 长度异常");
+			}
+			if (listType === END) {
+				return offset;
+			}
+			for (let index = 0; index < length; index++) {
+				offset = skipAt(buffer, offset, listType);
+			}
+			return offset;
+		}
+		case COMPOUND: {
+			while (true) {
+				need(1);
+				const child = buffer[offset];
+				offset += 1;
+				if (child === END) {
+					return offset;
+				}
+				need(2);
+				const nameLength = buffer.readUInt16BE(offset);
+				need(2 + nameLength);
+				offset += 2 + nameLength;
+				offset = skipAt(buffer, offset, child);
+			}
+		}
+		case INT_ARRAY:
+		case LONG_ARRAY: {
+			need(4);
+			const length = buffer.readInt32BE(offset);
+			if (length < 0) {
+				throw new Error("NBT 长度异常");
+			}
+			const bytes = length * (tag === INT_ARRAY ? 4 : 8);
+			need(4 + bytes);
+			return offset + 4 + bytes;
+		}
+		default:
+			throw new Error(`未知 NBT 类型 ${tag}`);
+	}
+}
+
+function createCursor(buffer) {
+	let offset = 0;
+	function take(size) {
+		if (offset + size > buffer.length) {
+			throw new Error("NBT 超出文件末尾");
+		}
+		const at = offset;
+		offset += size;
+		return at;
+	}
+	return {
+		offset: () => offset,
+		u8: () => buffer[take(1)],
+		i8: () => buffer.readInt8(take(1)),
+		i16: () => buffer.readInt16BE(take(2)),
+		i32: () => buffer.readInt32BE(take(4)),
+		string() {
+			const length = buffer.readUInt16BE(take(2));
+			const at = take(length);
+			return buffer.toString("utf8", at, at + length);
+		},
+		skip(tag) {
+			offset = skipAt(buffer, offset, tag);
+		},
+		longArray() {
+			const length = buffer.readInt32BE(take(4));
+			if (length < 0 || length > 8192) {
+				throw new Error("NBT 长度异常");
+			}
+			const items = new Array(length);
+			for (let index = 0; index < length; index++) {
+				items[index] = buffer.readBigInt64BE(take(8));
+			}
+			return items;
+		},
+	};
+}
+
+function readNumber(cursor, tag) {
+	if (tag === BYTE) {
+		return cursor.i8();
+	}
+	if (tag === SHORT) {
+		return cursor.i16();
+	}
+	if (tag === INT) {
+		return cursor.i32();
+	}
+	cursor.skip(tag);
+	return null;
+}
+
+function readPalette(cursor) {
+	const listType = cursor.u8();
+	const length = cursor.i32();
+	const palette = [];
+	if (listType === END || length <= 0) {
+		return palette;
+	}
+	if (length > 4096) {
+		throw new Error("调色板过长");
+	}
+	for (let index = 0; index < length; index++) {
+		if (listType === STRING) {
+			palette.push(cursor.string());
+			continue;
+		}
+		if (listType !== COMPOUND) {
+			cursor.skip(listType);
+			palette.push("minecraft:air");
+			continue;
+		}
+		let name = "minecraft:air";
+		while (true) {
+			const tag = cursor.u8();
+			if (tag === END) {
+				break;
+			}
+			const key = cursor.string();
+			if (key === "Name" && tag === STRING) {
+				name = cursor.string();
+			} else {
+				cursor.skip(tag);
+			}
+		}
+		palette.push(name);
+	}
+	return palette;
+}
+
+function readBlockStates(cursor) {
+	let palette = [];
+	let data = [];
+	while (true) {
+		const tag = cursor.u8();
+		if (tag === END) {
+			break;
+		}
+		const name = cursor.string();
+		if ((name === "palette" || name === "Palette") && tag === LIST) {
+			palette = readPalette(cursor);
+		} else if ((name === "data" || name === "Data") && tag === LONG_ARRAY) {
+			data = cursor.longArray();
+		} else {
+			cursor.skip(tag);
+		}
+	}
+	return { palette, data };
+}
+
+function readSection(slice) {
+	const cursor = createCursor(slice);
+	let Y = 0;
+	let blockStates = null;
+	let legacyPalette = null;
+	let legacyData = null;
+	while (cursor.offset() < slice.length) {
+		const tag = cursor.u8();
+		if (tag === END) {
+			break;
+		}
+		const name = cursor.string();
+		if (name === "Y") {
+			const value = readNumber(cursor, tag);
+			if (value != null) {
+				Y = value;
+			}
+		} else if ((name === "block_states" || name === "BlockStates") && tag === COMPOUND) {
+			blockStates = readBlockStates(cursor);
+		} else if (name === "Palette" && tag === LIST) {
+			legacyPalette = readPalette(cursor);
+		} else if (name === "BlockStates" && tag === LONG_ARRAY) {
+			legacyData = cursor.longArray();
+		} else {
+			cursor.skip(tag);
+		}
+	}
+	if (!blockStates && legacyPalette) {
+		blockStates = { palette: legacyPalette, data: legacyData ?? [] };
+	}
+	return { Y, block_states: blockStates };
+}
+
+function peekSectionY(slice) {
+	const cursor = createCursor(slice);
+	while (cursor.offset() < slice.length) {
+		const tag = cursor.u8();
+		if (tag === END) {
+			return null;
+		}
+		const name = cursor.string();
+		if (name === "Y") {
+			return readNumber(cursor, tag);
+		}
+		cursor.skip(tag);
+	}
+	return null;
+}
+
+function readSectionList(cursor, buffer) {
+	const listType = cursor.u8();
+	const length = cursor.i32();
+	const slices = [];
+	if (listType === END || length <= 0) {
+		return slices;
+	}
+	if (length > 48) {
+		throw new Error("区块段过多");
+	}
+	for (let index = 0; index < length; index++) {
+		if (listType !== COMPOUND) {
+			cursor.skip(listType);
+			continue;
+		}
+		const start = cursor.offset();
+		cursor.skip(COMPOUND);
+		slices.push(buffer.subarray(start, cursor.offset()));
+	}
+	return slices;
+}
+
+function readSurfaceMap(cursor) {
+	let surface = null;
+	let generated = null;
+	while (true) {
+		const tag = cursor.u8();
+		if (tag === END) {
+			return surface ?? generated;
+		}
+		const name = cursor.string();
+		if (name === "WORLD_SURFACE" && tag === LONG_ARRAY) {
+			surface = cursor.longArray();
+		} else if (name === "WORLD_SURFACE_WG" && tag === LONG_ARRAY) {
+			generated = cursor.longArray();
+		} else {
+			cursor.skip(tag);
+		}
+	}
+}
+
+function readChunkCompound(cursor, buffer, found) {
+	while (true) {
+		const tag = cursor.u8();
+		if (tag === END) {
+			return;
+		}
+		const name = cursor.string();
+		if (name === "yPos" && tag === INT) {
+			found.yPos = cursor.i32();
+		} else if (name === "Level" && tag === COMPOUND) {
+			readChunkCompound(cursor, buffer, found);
+		} else if (name === "Heightmaps" && tag === COMPOUND) {
+			const map = readSurfaceMap(cursor);
+			if (map) {
+				found.heightmap = map;
+			}
+		} else if ((name === "sections" || name === "Sections") && tag === LIST) {
+			found.slices = readSectionList(cursor, buffer);
+		} else {
+			cursor.skip(tag);
+		}
+	}
+}
+
+// 只保留高度图指向的地表段，光照、生物群系和地下段直接跳过。
+export function readMapChunk(buffer, fallbackMinY = -64) {
+	if (!Buffer.isBuffer(buffer)) {
+		buffer = Buffer.from(buffer);
+	}
+	const cursor = createCursor(buffer);
+	const type = cursor.u8();
+	if (type !== COMPOUND) {
+		throw new Error(`区块根标签不是 compound（${type}）`);
+	}
+	cursor.string();
+	const found = { yPos: null, heightmap: null, slices: [] };
+	readChunkCompound(cursor, buffer, found);
+	const minY = found.yPos == null ? fallbackMinY : found.yPos * 16;
+	let columns = null;
+	let needed = null;
+	if (found.heightmap) {
+		const parsed = heightmapColumns(found.heightmap, minY);
+		if (parsed) {
+			columns = parsed.columns;
+			needed = parsed.sections;
+		}
+	}
+	const sections = [];
+	for (const slice of found.slices) {
+		const y = peekSectionY(slice);
+		if (needed && !needed.has(y)) {
+			continue;
+		}
+		sections.push(readSection(slice));
+	}
+	return { minY, columns, sections };
+}
+
 export async function decompressChunk(compression, payload) {
 	if (compression === 1) {
-		return gunzipSync(payload);
+		return gunzipAsync(payload);
 	}
 	if (compression === 2) {
-		return inflateSync(payload);
+		return inflateAsync(payload);
 	}
 	if (compression === 3) {
 		return payload;
