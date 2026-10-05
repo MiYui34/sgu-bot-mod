@@ -5,3 +5,6 @@ player
 carpet
 playerAction
 playerManager
+ruleSearch
+spark
+servux

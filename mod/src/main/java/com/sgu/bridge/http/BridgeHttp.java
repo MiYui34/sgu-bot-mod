@@ -11,7 +11,9 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import net.minecraft.commands.CommandSource;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.Style;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.permissions.PermissionSet;
@@ -23,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -84,20 +87,10 @@ public final class BridgeHttp {
 			}
 			String method = exchange.getRequestMethod();
 			String path = exchange.getRequestURI().getPath();
-			if ("GET".equals(method) && "/v1/health".equals(path)) {
-				JsonObject body = new JsonObject();
-				body.addProperty("ok", true);
-				send(exchange, 200, body.toString());
-				return;
-			}
-			if ("GET".equals(method) && (path.equals("/v1/regions") || path.startsWith("/v1/regions/"))) {
-				serveRegions(exchange, path);
-				return;
-			}
-			JsonObject body = call(path, method, exchange);
-			int status = body.has("status") ? body.get("status").getAsInt() : 200;
-			body.remove("status");
-			send(exchange, status, body.toString());
+			String query = exchange.getRequestURI().getRawQuery();
+			String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+			Reply reply = serve(method, path, query == null ? "" : query, requestBody);
+			writeReply(exchange, reply);
 		} catch (TimeoutException e) {
 			send(exchange, 504, error("服务器线程没有及时响应").toString());
 		} catch (Exception e) {
@@ -109,16 +102,33 @@ public final class BridgeHttp {
 		}
 	}
 
-	private JsonObject call(String path, String method, HttpExchange exchange) throws Exception {
+	public Reply serve(String method, String path, String query, String requestBody) throws Exception {
+		if ("GET".equals(method) && "/v1/health".equals(path)) {
+			JsonObject body = new JsonObject();
+			body.addProperty("ok", true);
+			return Reply.json(200, body);
+		}
+		if ("GET".equals(method) && (path.equals("/v1/regions") || path.startsWith("/v1/regions/"))) {
+			return serveRegions(path);
+		}
+		JsonObject body = call(path, method, query, requestBody == null ? "" : requestBody);
+		int status = body.has("status") ? body.get("status").getAsInt() : 200;
+		body.remove("status");
+		return Reply.json(status, body);
+	}
+
+	private JsonObject call(String path, String method, String query, String requestBody) throws Exception {
 		MinecraftServer minecraft = runtime.server();
 		if (minecraft == null) {
 			return status(503, error("服务器还没启动"));
 		}
-		String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+		if ("POST".equals(method) && "/v1/commands".equals(path)) {
+			return runCommand(minecraft, requestBody);
+		}
 		CompletableFuture<JsonObject> future = new CompletableFuture<>();
 		minecraft.execute(() -> {
 			try {
-				future.complete(dispatch(minecraft, method, path, exchange.getRequestURI().getRawQuery(), requestBody));
+				future.complete(dispatch(minecraft, method, path, query, requestBody));
 			} catch (Throwable t) {
 				future.completeExceptionally(t);
 			}
@@ -156,12 +166,17 @@ public final class BridgeHttp {
 		if ("GET".equals(method) && "/v1/players/last-death".equals(path)) {
 			return queryPlayer(minecraft, query, false);
 		}
-		if ("POST".equals(method) && path.startsWith("/v1/fake-players/") && path.endsWith("/kill")) {
+		if ("POST".equals(method) && path.startsWith("/v1/fake-players/") && path.endsWith("/kill")
+			&& path.length() > "/v1/fake-players/".length() + "/kill".length()) {
 			String encoded = path.substring("/v1/fake-players/".length(), path.length() - "/kill".length());
-			return killFake(minecraft, decode(encoded));
+			String name = decode(encoded);
+			if (name == null) {
+				return status(400, error("假人名字不合法"));
+			}
+			return killFake(minecraft, name, requestBody);
 		}
-		if ("POST".equals(method) && "/v1/commands".equals(path)) {
-			return runCommand(minecraft, requestBody);
+		if ("POST".equals(method) && "/v1/name-prefix".equals(path)) {
+			return setNamePrefix(minecraft, requestBody);
 		}
 		return status(404, error("未知接口"));
 	}
@@ -173,7 +188,7 @@ public final class BridgeHttp {
 		}
 		String canonical = runtime.store().canonicalName(minecraft, name);
 		JsonObject row = logout
-			? runtime.store().queryLogout(canonical, runtime.store().playerOnline(minecraft, canonical))
+			? runtime.store().queryLogout(minecraft, canonical)
 			: runtime.store().queryDeath(canonical);
 		if (row == null) {
 			return status(404, error("没有找到该玩家的记录"));
@@ -182,7 +197,7 @@ public final class BridgeHttp {
 		return row;
 	}
 
-	private JsonObject killFake(MinecraftServer minecraft, String name) {
+	private JsonObject killFake(MinecraftServer minecraft, String name, String requestBody) {
 		if (!FakePlayers.validName(name)) {
 			return status(400, error("假人名字不合法"));
 		}
@@ -190,8 +205,11 @@ public final class BridgeHttp {
 		if (player == null || !FakePlayers.isFake(player)) {
 			return status(404, error("这个假人当前不在线"));
 		}
+		String actor = actorName(requestBody);
+		if (!actor.isEmpty()) {
+			runtime.store().noteLogoutActor(player.getGameProfile().name(), actor, "qq");
+		}
 		String output = execute(minecraft, "player " + name + " kill");
-		runtime.store().markFakeOffline(player.getGameProfile().name(), com.sgu.bridge.store.RecordStore.now());
 		JsonObject body = new JsonObject();
 		body.addProperty("ok", true);
 		body.addProperty("name", player.getGameProfile().name());
@@ -199,7 +217,7 @@ public final class BridgeHttp {
 		return body;
 	}
 
-	private JsonObject runCommand(MinecraftServer minecraft, String requestBody) {
+	private JsonObject runCommand(MinecraftServer minecraft, String requestBody) throws Exception {
 		JsonObject input;
 		try {
 			input = JsonParser.parseString(requestBody).getAsJsonObject();
@@ -218,23 +236,73 @@ public final class BridgeHttp {
 			denied.addProperty("ok", false);
 			return status(403, denied);
 		}
+		StringBuffer output = new StringBuffer();
+		CompletableFuture<Void> ran = new CompletableFuture<>();
+		minecraft.execute(() -> {
+			try {
+				perform(minecraft, command, output);
+				ran.complete(null);
+			} catch (Throwable t) {
+				ran.completeExceptionally(t);
+			}
+		});
+		ran.get(8, TimeUnit.SECONDS);
+		awaitOutput(command, output);
+		String text = output.toString();
+		JsonObject body = new JsonObject();
+		body.addProperty("ok", true);
+		body.addProperty("command", command);
+		body.addProperty("output", text.isBlank() ? "(无输出)" : text);
+		return body;
+	}
+
+	private JsonObject setNamePrefix(MinecraftServer minecraft, String requestBody) {
+		JsonObject input;
+		try {
+			input = JsonParser.parseString(requestBody).getAsJsonObject();
+		} catch (Exception e) {
+			return status(400, error("请求体不是 JSON"));
+		}
+		if (!input.has("officialId") || !input.get("officialId").isJsonPrimitive()
+			|| !input.has("nickname") || !input.get("nickname").isJsonPrimitive()) {
+			return status(400, error("缺少正版 ID 或昵称"));
+		}
+		String officialId = input.get("officialId").getAsString().strip();
+		String nickname = input.get("nickname").getAsString().strip();
+		if (nickname.startsWith("[") && nickname.endsWith("]") && nickname.length() > 2) {
+			nickname = nickname.substring(1, nickname.length() - 1).strip();
+		}
+		if (!officialId.matches("[A-Za-z0-9_]{3,16}")) {
+			return status(400, error("正版 ID 需为 3 到 16 位字母、数字或下划线"));
+		}
+		if (!nickname.matches("[\\p{IsHan}A-Za-z0-9_\\-]{1,16}")) {
+			return status(400, error("昵称需为 1 到 16 位中文、字母、数字或下划线"));
+		}
+		String command = "name other prefix " + officialId + " [" + nickname + "]";
+		if (CommandGuard.rejected(command)) {
+			return status(400, error("指令不合法"));
+		}
 		String output = execute(minecraft, command);
 		JsonObject body = new JsonObject();
 		body.addProperty("ok", true);
+		body.addProperty("officialId", officialId);
+		body.addProperty("nickname", nickname);
 		body.addProperty("command", command);
 		body.addProperty("output", output.isBlank() ? "(无输出)" : output);
 		return body;
 	}
 
 	private static String execute(MinecraftServer minecraft, String command) {
-		StringBuilder output = new StringBuilder();
+		StringBuffer output = new StringBuffer();
+		perform(minecraft, command, output);
+		return output.toString();
+	}
+
+	private static void perform(MinecraftServer minecraft, String command, StringBuffer output) {
 		CommandSource source = new CommandSource() {
 			@Override
 			public void sendSystemMessage(Component message) {
-				if (!output.isEmpty()) {
-					output.append('\n');
-				}
-				output.append(message.getString());
+				appendLine(output, plain(message));
 			}
 
 			@Override
@@ -272,19 +340,86 @@ public final class BridgeHttp {
 		try {
 			minecraft.getCommands().performPrefixedCommand(stack, command);
 		} catch (RuntimeException e) {
+			appendLine(output, e.getMessage() == null ? e.toString() : e.getMessage());
+		}
+	}
+
+	private static void awaitOutput(String command, StringBuffer output) throws InterruptedException {
+		boolean spark = "spark".equals(command) || command.startsWith("spark ");
+		long start = System.nanoTime();
+		long deadline = start + (spark ? 15_000_000_000L : 500_000_000L);
+		long quiet = spark ? 400_000_000L : 50_000_000L;
+		int seen = output.length();
+		long changedAt = start;
+		while (System.nanoTime() < deadline) {
+			int length = output.length();
+			if (length != seen) {
+				seen = length;
+				changedAt = System.nanoTime();
+			}
+			String text = output.toString();
+			if (spark && sparkStillWorking(text)) {
+				if (text.isBlank() && System.nanoTime() - start >= 2_000_000_000L) {
+					return;
+				}
+				Thread.sleep(40);
+				continue;
+			}
+			if (System.nanoTime() - changedAt >= quiet) {
+				return;
+			}
+			Thread.sleep(20);
+		}
+	}
+
+	private static boolean sparkStillWorking(String text) {
+		if (text.isBlank()) {
+			return true;
+		}
+		String lower = text.toLowerCase();
+		if (lower.contains("https://") || lower.contains("http://")) {
+			return false;
+		}
+		if (lower.contains("error") || lower.contains("not supported") || text.contains("错误") || text.contains("失败")) {
+			return false;
+		}
+		return lower.contains("generating") || lower.contains("upload") || lower.contains("opening");
+	}
+
+	private static void appendLine(StringBuffer output, String line) {
+		if (line == null || line.isBlank()) {
+			return;
+		}
+		synchronized (output) {
 			if (!output.isEmpty()) {
 				output.append('\n');
 			}
-			output.append(e.getMessage() == null ? e.toString() : e.getMessage());
+			output.append(line.strip());
 		}
-		return output.toString();
 	}
 
-	private void serveRegions(HttpExchange exchange, String path) throws IOException {
+	private static String plain(Component message) {
+		StringBuilder text = new StringBuilder(message.getString());
+		message.visit((style, part) -> {
+			ClickEvent click = style.getClickEvent();
+			if (click instanceof ClickEvent.OpenUrl open) {
+				String url = open.uri().toString();
+				if (!text.toString().contains(url)) {
+					if (!text.isEmpty() && text.charAt(text.length() - 1) != '\n') {
+						text.append('\n');
+					}
+					text.append(url);
+				}
+			}
+			return Optional.empty();
+		}, Style.EMPTY);
+		return text.toString();
+	}
+
+	private Reply serveRegions(String path) throws IOException {
 		Path root = runtime.worldRoot();
 		if (root == null) {
-			send(exchange, 503, error("世界目录还没准备好").toString());
-			return;
+			return Reply.json(503, error("世界目录还没准备好"));
 		}
 		if ("/v1/regions".equals(path)) {
 			JsonObject body = new JsonObject();
@@ -298,27 +433,24 @@ public final class BridgeHttp {
 				files.add(row);
 			}
 			body.add("files", files);
-			send(exchange, 200, body.toString());
-			return;
+			body.addProperty("world", runtime.worldId());
+			return Reply.json(200, body);
 		}
 		Matcher matcher = REGION_FILE.matcher(path);
 		if (!matcher.matches()) {
-			send(exchange, 404, error("未找到").toString());
-			return;
+			return Reply.json(404, error("未找到"));
 		}
 		Path file;
 		try {
 			file = RegionFiles.resolve(root, matcher.group(1), matcher.group(2));
 		} catch (IOException e) {
-			send(exchange, 404, error("未找到").toString());
-			return;
+			return Reply.json(404, error("未找到"));
 		}
 		long size = Files.size(file);
-		exchange.getResponseHeaders().set("Content-Type", "application/octet-stream");
-		exchange.sendResponseHeaders(200, size);
-		try (OutputStream out = exchange.getResponseBody()) {
-			Files.copy(file, out);
+		if (size > 128L * 1024 * 1024) {
+			return Reply.json(413, error("区域文件过大"));
 		}
+		return Reply.bytes(200, Files.readAllBytes(file));
 	}
 
 	private boolean authorized(HttpExchange exchange) {
@@ -346,15 +478,34 @@ public final class BridgeHttp {
 			if (eq < 0) {
 				continue;
 			}
-			if (decode(part.substring(0, eq)).equals(key)) {
+			if (key.equals(decode(part.substring(0, eq)))) {
 				return decode(part.substring(eq + 1));
 			}
 		}
 		return null;
 	}
 
+	private static String actorName(String requestBody) {
+		if (requestBody == null || requestBody.isBlank()) {
+			return "";
+		}
+		try {
+			JsonObject input = JsonParser.parseString(requestBody).getAsJsonObject();
+			if (!input.has("actor") || !input.get("actor").isJsonPrimitive()) {
+				return "";
+			}
+			return input.get("actor").getAsString().strip();
+		} catch (Exception e) {
+			return "";
+		}
+	}
+
 	private static String decode(String value) {
-		return java.net.URLDecoder.decode(value, StandardCharsets.UTF_8);
+		try {
+			return java.net.URLDecoder.decode(value, StandardCharsets.UTF_8);
+		} catch (IllegalArgumentException e) {
+			return null;
+		}
 	}
 
 	private static JsonObject error(String message) {
@@ -368,12 +519,61 @@ public final class BridgeHttp {
 		return body;
 	}
 
+	private static void writeReply(HttpExchange exchange, Reply reply) throws IOException {
+		if (reply.binary()) {
+			byte[] bytes = reply.bytes();
+			exchange.getResponseHeaders().set("Content-Type", "application/octet-stream");
+			exchange.sendResponseHeaders(reply.status(), bytes.length);
+			try (OutputStream out = exchange.getResponseBody()) {
+				out.write(bytes);
+			}
+			return;
+		}
+		send(exchange, reply.status(), reply.json());
+	}
+
 	private static void send(HttpExchange exchange, int status, String body) throws IOException {
 		byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
 		exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
 		exchange.sendResponseHeaders(status, bytes.length);
 		try (OutputStream out = exchange.getResponseBody()) {
 			out.write(bytes);
+		}
+	}
+
+	public static final class Reply {
+		private final int status;
+		private final String json;
+		private final byte[] bytes;
+
+		private Reply(int status, String json, byte[] bytes) {
+			this.status = status;
+			this.json = json;
+			this.bytes = bytes;
+		}
+
+		public static Reply json(int status, JsonObject body) {
+			return new Reply(status, body.toString(), null);
+		}
+
+		public static Reply bytes(int status, byte[] bytes) {
+			return new Reply(status, null, bytes);
+		}
+
+		public int status() {
+			return status;
+		}
+
+		public String json() {
+			return json;
+		}
+
+		public byte[] bytes() {
+			return bytes;
+		}
+
+		public boolean binary() {
+			return bytes != null;
 		}
 	}
 }

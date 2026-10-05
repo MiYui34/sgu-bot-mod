@@ -1,8 +1,8 @@
 import { Worker } from "node:worker_threads";
 import { renderTile } from "./render.js";
 
-// 只留一个绘制进程，另一颗核心留给网页请求，避免拖动地图时整页卡住。
-const SIZE = 1;
+// 两路同时画。香港云服从内地拉区域时，单路会让眼前的地形排很久。
+const SIZE = 2;
 const workers = [];
 const queue = [];
 let nextId = 1;
@@ -10,7 +10,11 @@ let failed = false;
 let crashes = 0;
 
 function inline(job) {
-	return renderTile(job).then((result) => ({ painted: Boolean(result.body), body: result.body }));
+	return renderTile(job).then((result) => ({
+		painted: Boolean(result.body),
+		body: result.body,
+		missing: Boolean(result.missing),
+	}));
 }
 
 function spawn() {
@@ -72,7 +76,7 @@ function finish(worker, message) {
 		if (message.error) {
 			current.reject(new Error(message.error));
 		} else {
-			current.resolve({ painted: message.painted, body: message.body });
+			current.resolve({ painted: message.painted, body: message.body, missing: Boolean(message.missing) });
 		}
 	}
 	pump();
@@ -88,6 +92,15 @@ function pump() {
 		worker.current = item;
 		worker.postMessage(item.message);
 	}
+}
+
+export async function stopPainters() {
+	const current = workers.splice(0, workers.length);
+	queue.length = 0;
+	await Promise.all(current.map((worker) => {
+		worker.retired = true;
+		return worker.terminate();
+	}));
 }
 
 export function renderInPool(job) {
@@ -108,7 +121,7 @@ export function renderInPool(job) {
 	return new Promise((resolve, reject) => {
 		const id = nextId;
 		nextId += 1;
-		queue.push({ resolve, reject, message: { ...job, id } });
+		queue.unshift({ resolve, reject, message: { ...job, id } });
 		pump();
 	});
 }

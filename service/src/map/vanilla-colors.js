@@ -1,4 +1,5 @@
-// 原版 MapColor（Minecraft 1.21.11）。这是游戏给每个方块登记的颜色，不含地形阴影。
+// 方块对应的 1.21.9 地图基准色（亮度状态 2，最亮的一档）。
+// 暗、正常、最暗三档在 map-palette.js，绘制时按北边高度选用。
 export const BLOCK_COLOR = {
 	"minecraft:air": null,
 	"minecraft:stone": [112, 112, 112, 255],

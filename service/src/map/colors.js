@@ -1,72 +1,6 @@
 import { packedIndex } from "./nbt.js";
+import { brightnessVariant, shadeRgb } from "./map-palette.js";
 import { BLOCK_COLOR } from "./vanilla-colors.js";
-
-// 游戏里会染色的方块。这些值是原版写死的平原/默认色，不是地图色。
-const GRASS = [0x91, 0xbd, 0x59, 255];
-const FOLIAGE = [0x77, 0xab, 0x2f, 255];
-const BIRCH = [0x80, 0xa7, 0x55, 255];
-const SPRUCE = [0x61, 0x99, 0x61, 255];
-const MANGROVE = [0x92, 0xc6, 0x48, 255];
-const WATER = [0x3f, 0x76, 0xe4, 255];
-const LILY = [0x20, 0x80, 0x30, 255];
-const STEM = [0xe0, 0xc7, 0x1c, 255];
-const LAVA = [232, 74, 0, 255];
-
-const TINT = {
-	"minecraft:grass_block": GRASS,
-	"minecraft:short_grass": GRASS,
-	"minecraft:grass": GRASS,
-	"minecraft:tall_grass": GRASS,
-	"minecraft:fern": GRASS,
-	"minecraft:large_fern": GRASS,
-	"minecraft:sugar_cane": GRASS,
-	"minecraft:bush": GRASS,
-	"minecraft:firefly_bush": GRASS,
-	"minecraft:leaf_litter": GRASS,
-	"minecraft:oak_leaves": FOLIAGE,
-	"minecraft:jungle_leaves": FOLIAGE,
-	"minecraft:acacia_leaves": FOLIAGE,
-	"minecraft:dark_oak_leaves": FOLIAGE,
-	"minecraft:azalea_leaves": FOLIAGE,
-	"minecraft:flowering_azalea_leaves": FOLIAGE,
-	"minecraft:vine": FOLIAGE,
-	"minecraft:birch_leaves": BIRCH,
-	"minecraft:spruce_leaves": SPRUCE,
-	"minecraft:mangrove_leaves": MANGROVE,
-	"minecraft:water": WATER,
-	"minecraft:bubble_column": WATER,
-	"minecraft:water_cauldron": WATER,
-	"minecraft:lily_pad": LILY,
-	"minecraft:melon_stem": STEM,
-	"minecraft:pumpkin_stem": STEM,
-	"minecraft:attached_melon_stem": STEM,
-	"minecraft:attached_pumpkin_stem": STEM,
-	"minecraft:lava": LAVA,
-	"minecraft:lava_cauldron": LAVA,
-	"minecraft:dandelion": [248, 220, 50, 255],
-	"minecraft:sunflower": [240, 200, 40, 255],
-	"minecraft:poppy": [200, 40, 35, 255],
-	"minecraft:red_tulip": [200, 40, 40, 255],
-	"minecraft:rose_bush": [180, 40, 50, 255],
-	"minecraft:torchflower": [240, 140, 40, 255],
-	"minecraft:orange_tulip": [230, 140, 40, 255],
-	"minecraft:blue_orchid": [40, 170, 210, 255],
-	"minecraft:allium": [180, 100, 210, 255],
-	"minecraft:lilac": [190, 130, 200, 255],
-	"minecraft:azure_bluet": [230, 235, 200, 255],
-	"minecraft:oxeye_daisy": [220, 220, 190, 255],
-	"minecraft:white_tulip": [240, 240, 240, 255],
-	"minecraft:lily_of_the_valley": [230, 230, 230, 255],
-	"minecraft:pink_tulip": [230, 170, 200, 255],
-	"minecraft:peony": [220, 160, 190, 255],
-	"minecraft:pink_petals": [232, 168, 186, 255],
-	"minecraft:cornflower": [70, 100, 210, 255],
-	"minecraft:wither_rose": [40, 30, 30, 255],
-	"minecraft:pitcher_plant": [60, 100, 70, 255],
-	"minecraft:spore_blossom": [210, 120, 180, 255],
-	"minecraft:open_eyeblossom": [230, 150, 50, 255],
-	"minecraft:closed_eyeblossom": [180, 170, 160, 255],
-};
 
 const DYE_ORDER = ["light_blue", "light_gray", "white", "orange", "magenta", "yellow", "lime", "pink", "gray", "cyan", "purple", "blue", "brown", "green", "red", "black"];
 const DYE = {
@@ -100,14 +34,19 @@ export function isAir(name) {
 	return SKIP.has(name);
 }
 
-export function colorOf(name) {
+export function colorOf(name, variant = 2) {
+	const base = baseColor(name);
+	if (!base) {
+		return null;
+	}
+	return shadeRgb(base, variant);
+}
+
+function baseColor(name) {
 	if (!name || isAir(name)) {
 		return null;
 	}
 	const id = name.includes(":") ? name : `minecraft:${name}`;
-	if (TINT[id]) {
-		return TINT[id];
-	}
 	if (Object.hasOwn(BLOCK_COLOR, id)) {
 		return BLOCK_COLOR[id];
 	}
@@ -117,16 +56,13 @@ export function colorOf(name) {
 function fallbackColor(id) {
 	const bare = id.slice(id.indexOf(":") + 1);
 	if (bare === "water" || bare.endsWith("_water") || bare === "bubble_column") {
-		return WATER;
+		return BLOCK_COLOR["minecraft:water"];
 	}
 	if (bare === "lava" || bare.endsWith("_lava")) {
-		return LAVA;
+		return BLOCK_COLOR["minecraft:lava"];
 	}
-	if (bare.endsWith("_leaves")) {
-		if (bare.includes("birch")) return BIRCH;
-		if (bare.includes("spruce")) return SPRUCE;
-		if (bare.includes("mangrove")) return MANGROVE;
-		return FOLIAGE;
+	if (bare.endsWith("_leaves") || bare === "vine") {
+		return BLOCK_COLOR["minecraft:oak_leaves"];
 	}
 	if (bare.endsWith("_log") || bare.endsWith("_wood") || bare.endsWith("_hyphae") || bare.endsWith("_stem")) {
 		return BLOCK_COLOR["minecraft:oak_log"];
@@ -223,6 +159,7 @@ function colorsFromColumns(sections, columns) {
 		byY.set(Number(section.Y ?? 0), prepareSection(section));
 	}
 	const grid = new Array(256).fill(null);
+	const heights = new Array(256).fill(null);
 	for (let index = 0; index < 256; index++) {
 		const blockY = columns[index];
 		if (blockY === -32768) {
@@ -237,20 +174,63 @@ function colorsFromColumns(sections, columns) {
 		if (!colorAt) {
 			continue;
 		}
-		grid[index] = colorAt(index & 15, localY, index >> 4);
+		const color = colorAt(index & 15, localY, index >> 4);
+		if (!color) {
+			continue;
+		}
+		grid[index] = color;
+		heights[index] = blockY;
 	}
+	return shadeGrid(grid, heights);
+}
+
+function usableHeight(value) {
+	if (value == null || value === -32768) {
+		return null;
+	}
+	return value;
+}
+
+function shadeGrid(grid, heights, northRow = null) {
+	const bases = grid.slice();
+	for (let index = 0; index < 256; index++) {
+		if (!bases[index]) {
+			continue;
+		}
+		const north = (index >> 4) === 0
+			? usableHeight(northRow?.[index & 15])
+			: usableHeight(heights[index - 16]);
+		grid[index] = shadeRgb(bases[index], brightnessVariant(heights[index], north));
+	}
+	grid.bases = bases;
+	grid.heights = heights;
 	return grid;
 }
 
-export function surfaceColors(root) {
+export function reshadeNorthEdge(colors, northRow) {
+	if (!colors?.bases || !northRow) {
+		return colors;
+	}
+	for (let x = 0; x < 16; x++) {
+		if (!colors.bases[x]) {
+			continue;
+		}
+		colors[x] = shadeRgb(colors.bases[x], brightnessVariant(colors.heights[x], usableHeight(northRow[x])));
+	}
+	return colors;
+}
+
+export function surfaceColors(root, northRow = null) {
 	if (root.columns && root.columns.length === 256) {
-		return colorsFromColumns(root.sections || root.Sections || [], root.columns);
+		const grid = colorsFromColumns(root.sections || root.Sections || [], root.columns);
+		return northRow ? reshadeNorthEdge(grid, northRow) : grid;
 	}
 	const sections = root.sections || root.Sections || root.Level?.Sections;
 	if (!Array.isArray(sections)) {
 		throw new Error("区块里没有 sections");
 	}
 	const grid = new Array(256).fill(null);
+	const heights = new Array(256).fill(null);
 	let missing = 256;
 	const sorted = [...sections].sort((a, b) => Number(b.Y ?? 0) - Number(a.Y ?? 0));
 	for (const section of sorted) {
@@ -265,6 +245,7 @@ export function surfaceColors(root) {
 		if (!Array.isArray(palette) || palette.length === 0) {
 			continue;
 		}
+		const sectionTop = Number(section.Y ?? 0) * 16 + 15;
 		if (palette.length === 1) {
 			const color = colorOf(blockName(palette[0]));
 			if (!color) {
@@ -275,6 +256,7 @@ export function surfaceColors(root) {
 					continue;
 				}
 				grid[column] = color;
+				heights[column] = sectionTop;
 				missing--;
 			}
 			continue;
@@ -283,6 +265,7 @@ export function surfaceColors(root) {
 		if (!blocks) {
 			continue;
 		}
+		const sectionY = Number(section.Y ?? 0);
 		for (let y = 15; y >= 0 && missing > 0; y--) {
 			for (let z = 0; z < 16; z++) {
 				for (let x = 0; x < 16; x++) {
@@ -293,13 +276,14 @@ export function surfaceColors(root) {
 					const color = colorOf(blocks[(y << 8) | (z << 4) | x]);
 					if (color) {
 						grid[column] = color;
+						heights[column] = sectionY * 16 + y;
 						missing--;
 					}
 				}
 			}
 		}
 	}
-	return grid;
+	return shadeGrid(grid, heights, northRow);
 }
 
 export function chunkToTile(chunkX, chunkZ, tileSize = 256) {

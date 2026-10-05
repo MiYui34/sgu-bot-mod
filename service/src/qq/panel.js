@@ -3,7 +3,7 @@ import { panelItems } from "../bot/handle.js";
 const REMARK = "sgu-bridge";
 
 export async function ensurePanel(qq, config) {
-	const panel = { items: panelItems(config.mapPublicUrl), remark: REMARK };
+	const panel = { items: panelItems(), remark: REMARK };
 	const list = await qq.api("GET", "/v2/panels?scope=group&limit=50");
 	const panels = list.panels || list.data || [];
 	const existing = panels.find((item) => item.panel?.remark === REMARK || item.remark === REMARK);

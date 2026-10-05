@@ -73,11 +73,18 @@ public final class RegionFiles {
 				if (!NAME.matcher(name).matches() || !Files.isRegularFile(path)) {
 					continue;
 				}
-				long size = Files.size(path);
+				long size;
+				long mtime;
+				try {
+					size = Files.size(path);
+					mtime = Files.getLastModifiedTime(path).toMillis();
+				} catch (IOException e) {
+					continue;
+				}
 				if (size < 8192) {
 					continue;
 				}
-				files.add(new Listed(dim, name, size, Files.getLastModifiedTime(path).toMillis()));
+				files.add(new Listed(dim, name, size, mtime));
 			}
 		}
 	}

@@ -2,116 +2,575 @@
 <html lang="zh-CN">
 <head>
 	<meta charset="utf-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 	<title>服务器地图</title>
 	<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 	<style>
-		:root { color-scheme: light; }
+		:root, body[data-theme="parchment"] {
+			color-scheme: dark;
+			--bg-body: #c8b282;
+			--canvas-bg: #c8b282;
+			--ui-bg: rgba(28, 20, 12, 0.9);
+			--ui-text: #f8f1df;
+			--ui-muted: #d6c7a1;
+			--accent: #fef08a;
+			--card: rgba(36, 26, 17, 0.86);
+			--line: #785a33;
+			--field: rgba(0, 0, 0, 0.28);
+			--grid: rgba(48, 32, 8, 0.45);
+		}
+		body[data-theme="dark"] {
+			color-scheme: dark;
+			--bg-body: #0b1220;
+			--canvas-bg: #1e293b;
+			--ui-bg: rgba(15, 23, 42, 0.9);
+			--ui-text: #f8fafc;
+			--ui-muted: #94a3b8;
+			--accent: #38bdf8;
+			--card: rgba(30, 41, 59, 0.88);
+			--line: #475569;
+			--field: rgba(0, 0, 0, 0.28);
+			--grid: rgba(255, 255, 255, 0.38);
+		}
+		body[data-theme="amoled"] {
+			color-scheme: dark;
+			--bg-body: #000;
+			--canvas-bg: #050505;
+			--ui-bg: rgba(10, 10, 10, 0.94);
+			--ui-text: #fff;
+			--ui-muted: #888;
+			--accent: #4ade80;
+			--card: rgba(18, 18, 18, 0.92);
+			--line: #333;
+			--field: rgba(255, 255, 255, 0.06);
+			--grid: rgba(255, 255, 255, 0.34);
+		}
+		body[data-theme="light"] {
+			color-scheme: light;
+			--bg-body: #e8eef5;
+			--canvas-bg: #e2e8f0;
+			--ui-bg: rgba(255, 255, 255, 0.94);
+			--ui-text: #0f172a;
+			--ui-muted: #64748b;
+			--accent: #2563eb;
+			--card: rgba(241, 245, 249, 0.94);
+			--line: #94a3b8;
+			--field: rgba(15, 23, 42, 0.05);
+			--grid: rgba(15, 23, 42, 0.35);
+		}
 		* { box-sizing: border-box; }
 		html, body { margin: 0; height: 100%; }
 		body {
-			display: flex;
-			flex-direction: column;
 			font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-			background: #d7d1c3;
-			color: #1d1a16;
+			background: var(--bg-body);
+			color: var(--ui-text);
 		}
 		header {
+			position: absolute;
+			z-index: 1100;
+			top: 12px;
+			left: 12px;
+			right: 324px;
+			display: flex;
+			pointer-events: none;
+		}
+		.hud-card {
 			display: flex;
 			flex-wrap: wrap;
-			gap: 12px;
 			align-items: center;
-			padding: 10px 14px;
-			background: #243024;
-			color: #f4f1e8;
+			gap: 8px;
+			max-width: min(760px, 100%);
+			padding: 8px 10px;
+			pointer-events: auto;
+			background: var(--ui-bg);
+			border: 1px solid var(--line);
+			border-radius: 10px;
+			box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
 		}
-		header h1 { font-size: 16px; font-weight: 600; margin: 0; }
-		select, button, input {
-			font: inherit;
-			background: #f4f1e8;
-			color: #1d1a16;
-			border: 0;
+		header h1 { font-size: 16px; font-weight: 700; margin: 0; color: var(--accent); }
+		label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ui-muted); }
+		select, button, input { font: inherit; }
+		.hud-card button, .hud-card select, .hud-card input {
+			color: var(--ui-text);
+			background: var(--field);
+			border: 1px solid var(--line);
 			border-radius: 6px;
-			padding: 6px 10px;
+			padding: 4px 8px;
 		}
-		#goto { display: flex; gap: 8px; align-items: center; }
-		#goto input { width: 7.5rem; }
-		#place, #status { font-size: 13px; opacity: 0.85; }
-		#status { margin-left: auto; }
-		#map { flex: 1; min-height: 0; background: #c8c2b4; }
-		.player-label {
-			background: rgba(29, 26, 22, 0.82);
-			color: white;
+		.hud-card button { cursor: pointer; }
+		.hud-card button:hover, .hud-card button.active { color: var(--accent); border-color: var(--accent); }
+		#goto { display: flex; gap: 6px; align-items: center; margin: 0; }
+		#goto input { width: 5.6rem; text-align: center; }
+		#status { font-size: 13px; color: var(--ui-muted); font-variant-numeric: tabular-nums; }
+		#coord-readout {
+			position: absolute;
+			z-index: 1100;
+			left: 12px;
+			bottom: 12px;
+			display: grid;
+			grid-template-columns: auto 9ch auto 9ch;
+			column-gap: 8px;
+			align-items: baseline;
+			padding: 6px 10px;
+			background: var(--ui-bg);
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
+			color: var(--ui-text);
+			font-family: Consolas, "Cascadia Mono", "Sarasa Mono SC", ui-monospace, monospace;
+			font-size: 13px;
+			font-variant-numeric: tabular-nums;
+			pointer-events: none;
+		}
+		.coord-axis { color: var(--accent); font-weight: 700; }
+		#read-x, #read-z { width: 9ch; text-align: right; }
+		#status { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		#follow-pill {
+			align-items: center;
+			gap: 6px;
+			padding: 3px 8px;
+			border-radius: 999px;
+			background: var(--card);
+			border: 1px solid var(--accent);
+			color: var(--accent);
+			font-size: 13px;
+		}
+		#follow-pill:not([hidden]) { display: flex; }
+		#follow-name { color: var(--ui-text); }
+		#compass { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 30px; padding: 0; }
+		#compass-icon { display: block; transform-origin: 50% 50%; }
+		#stage { position: absolute; inset: 0; }
+		#map { height: 100%; background: var(--canvas-bg); }
+		#map canvas, .leaflet-tile { image-rendering: pixelated; }
+		#flash {
+			position: absolute;
+			inset: 0;
+			z-index: 800;
+			background: #fff;
+			opacity: 0;
+			pointer-events: none;
+		}
+		.leaflet-bar a, .leaflet-bar a:hover {
+			background: var(--ui-bg);
+			color: var(--ui-text);
+			border-bottom-color: var(--line);
+		}
+		.leaflet-bar a:hover { color: var(--accent); }
+		.leaflet-control-attribution {
+			background: var(--ui-bg);
+			color: var(--ui-muted);
+		}
+		#roster {
+			position: absolute;
+			top: 12px;
+			right: 12px;
+			z-index: 1200;
+			width: min(300px, calc(100vw - 24px));
+			background: var(--card);
+			color: var(--ui-text);
+			border: 1px solid var(--line);
+			border-radius: 10px;
+			box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+		}
+		#roster-toggle {
+			width: 100%;
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			background: transparent;
+			color: inherit;
+			border: 0;
+			border-radius: 10px;
+			padding: 8px 12px;
+			cursor: pointer;
+		}
+		#roster-count { font-size: 12px; color: var(--ui-muted); }
+		#roster-chevron { margin-left: 8px; }
+		#roster-body {
+			max-height: min(420px, 52vh);
+			overflow: auto;
+			border-top: 1px solid var(--line);
+		}
+		#roster.collapsed #roster-body { display: none; }
+		#roster:not(.collapsed) #roster-toggle { border-radius: 10px 10px 0 0; }
+		.roster-section { margin: 0; padding: 8px 0 4px; }
+		.roster-section h2 {
+			margin: 0;
+			padding: 0 12px 4px;
+			font-size: 12px;
+			font-weight: 600;
+			color: var(--ui-muted);
+		}
+		.roster-list { list-style: none; margin: 0; padding: 0; }
+		.roster-row { display: flex; align-items: center; gap: 8px; padding: 6px 12px; }
+		.roster-main { min-width: 0; flex: 1; }
+		.roster-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; font-weight: 600; }
+		.roster-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.roster-name::before {
+			content: "";
+			width: 8px;
+			height: 8px;
+			border-radius: 50%;
+			background: #8ec5ff;
+			flex: none;
+		}
+		.roster-row[data-fake="1"] .roster-name::before { background: #f0c37a; }
+		.roster-row[data-self="1"] .roster-name::before { background: var(--accent); }
+		.roster-meta { display: block; margin-top: 2px; font-size: 12px; color: var(--ui-muted); font-variant-numeric: tabular-nums; }
+		.roster-actions { display: flex; gap: 4px; flex: none; }
+		.roster-actions button { padding: 4px 8px; font-size: 12px; cursor: pointer; color: var(--ui-text); background: var(--field); border: 1px solid var(--line); border-radius: 6px; }
+		.roster-empty { margin: 0; padding: 0 12px 8px; font-size: 12px; color: var(--ui-muted); }
+		.leaflet-div-icon.pin { background: transparent; border: 0; }
+		.pin-arrow {
+			position: absolute;
+			left: 4px;
+			top: 1px;
+			width: 0;
+			height: 0;
+			border-left: 5px solid transparent;
+			border-right: 5px solid transparent;
+			border-bottom: 14px solid #8ec5ff;
+			transform-origin: 5px 8px;
+			filter: drop-shadow(0 0 1px #111);
+		}
+		.pin-arrow[data-kind="fake"] { border-bottom-color: #f0c37a; }
+		.pin-arrow[data-kind="self"] { border-bottom-color: #f4f1e8; }
+		.leaflet-tooltip.spot-label {
+			background: rgba(20, 16, 12, 0.82);
+			color: #fff;
 			border: 0;
 			border-radius: 4px;
+			box-shadow: none;
 			padding: 1px 4px;
 			font-size: 12px;
 		}
-		.leaflet-tooltip.player-label::before { display: none; }
+		.leaflet-tooltip.spot-label::before { display: none; }
+		.pin-name {
+			position: absolute;
+			left: 9px;
+			top: 0;
+			transform: translate(-50%, -100%) rotate(calc(var(--turn, 0) * -1deg));
+			transform-origin: center bottom;
+			background: rgba(20, 16, 12, 0.82);
+			color: #fff;
+			border-radius: 4px;
+			padding: 1px 4px;
+			font-size: 12px;
+			line-height: 1.3;
+			white-space: nowrap;
+			pointer-events: none;
+		}
+		body.locked { background: #1d2420; color: #f4f1e8; }
+		body.locked header, body.locked #stage { display: none; }
+		#gate {
+			display: none;
+			min-height: 100%;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			text-align: center;
+			padding: 32px 20px;
+			gap: 8px;
+		}
+		body.locked #gate { display: flex; flex: 1; }
+		#gate-kicker { margin: 0; letter-spacing: 0.18em; font-size: 13px; opacity: 0.7; }
+		#gate-code {
+			margin: 8px 0 0;
+			font-size: clamp(42px, 12vw, 76px);
+			font-weight: 700;
+			letter-spacing: 0.14em;
+			font-variant-numeric: tabular-nums;
+		}
+		#gate-wait, #gate-hint { margin: 0; max-width: 28rem; line-height: 1.5; }
+		#gate-wait { font-size: 15px; opacity: 0.85; }
+		#gate-hint { font-size: 14px; opacity: 0.72; }
+		@media (max-width: 860px) {
+			header { right: 12px; }
+			#roster { top: auto; bottom: 12px; }
+			#coord-readout { bottom: 64px; }
+		}
 	</style>
 </head>
-<body>
+<body class="locked">
+	<section id="gate" aria-live="polite">
+		<p id="gate-kicker">网页地图验证</p>
+		<p id="gate-code">------</p>
+		<p id="gate-wait">正在获取验证码</p>
+		<p id="gate-hint">验证通过前不会加载地图。</p>
+	</section>
 	<header>
-		<h1>服务器地图</h1>
-		<label>维度
-			<select id="dimension">
-				<option value="overworld">主世界</option>
-				<option value="nether">下界</option>
-				<option value="end">末地</option>
-			</select>
-		</label>
-		<form id="goto">
-			<label>X <input id="coord-x" name="x" inputmode="decimal" autocomplete="off" spellcheck="false"></label>
-			<label>Z <input id="coord-z" name="z" inputmode="decimal" autocomplete="off" spellcheck="false"></label>
-			<button type="submit">显示</button>
-		</form>
-		<button id="follow" type="button">回到玩家</button>
-		<span id="place"></span>
-		<span id="status">正在连接</span>
+		<div class="hud-card">
+			<h1>服务器地图</h1>
+			<label>维度
+				<select id="dimension">
+					<option value="overworld">主世界</option>
+					<option value="nether">下界</option>
+					<option value="end">末地</option>
+				</select>
+			</label>
+			<form id="goto">
+				<label>X <input id="coord-x" name="x" inputmode="decimal" autocomplete="off" spellcheck="false"></label>
+				<label>Z <input id="coord-z" name="z" inputmode="decimal" autocomplete="off" spellcheck="false"></label>
+				<button type="submit">前往</button>
+			</form>
+			<button id="follow" type="button">跟随玩家</button>
+			<button id="theme" type="button" title="切换主题">羊皮纸</button>
+			<button id="grid" type="button" title="显示或隐藏区块边界" aria-pressed="false">网格</button>
+			<button id="compass" type="button" title="恢复正北。按住 Ctrl 拖动，或按住鼠标右键拖动，可以转动地图。">
+				<svg id="compass-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+					<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.5"></circle>
+					<polygon points="12,4 15,13 12,11 9,13" fill="#ef4444"></polygon>
+					<polygon points="12,20 15,11 12,13 9,11" fill="currentColor"></polygon>
+				</svg>
+			</button>
+			<button id="shot" type="button">截图</button>
+			<button id="origin" type="button">原点</button>
+			<span id="follow-pill" hidden>正在跟随 <b id="follow-name"></b> <button id="unfollow" type="button">停止</button></span>
+			<span id="status">正在连接</span>
+		</div>
 	</header>
-	<div id="map"></div>
+	<div id="stage">
+		<div id="flash"></div>
+		<div id="map"></div>
+		<div id="coord-readout">
+			<span class="coord-axis">X</span><span id="read-x">0</span>
+			<span class="coord-axis">Z</span><span id="read-z">0</span>
+		</div>
+		<aside id="roster">
+			<button id="roster-toggle" type="button" aria-expanded="true" aria-controls="roster-body">
+				<span>在线列表</span>
+				<span><span id="roster-count">玩家 0 · 假人 0</span><span id="roster-chevron" aria-hidden="true">▾</span></span>
+			</button>
+			<div id="roster-body">
+				<section class="roster-section" aria-labelledby="roster-players-title">
+					<h2 id="roster-players-title">玩家</h2>
+					<ul id="roster-players" class="roster-list"></ul>
+				</section>
+				<section class="roster-section" aria-labelledby="roster-fakes-title">
+					<h2 id="roster-fakes-title">假人</h2>
+					<ul id="roster-fakes" class="roster-list"></ul>
+				</section>
+			</div>
+		</aside>
+	</div>
 	<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 	<script>
+		void boot();
+
+		function delay(ms) {
+			return new Promise((resolve) => setTimeout(resolve, ms));
+		}
+
+		function formatGateCode(code) {
+			const text = String(code || "");
+			return text.length === 6 ? `${text.slice(0, 3)} ${text.slice(3)}` : "------";
+		}
+
+		async function ensureAccess() {
+			const codeEl = document.querySelector("#gate-code");
+			const waitEl = document.querySelector("#gate-wait");
+			const hintEl = document.querySelector("#gate-hint");
+			for (;;) {
+				let data;
+				try {
+					const response = await fetch("/api/session");
+					if (!response.ok) throw new Error("验证服务没有响应");
+					data = await response.json();
+				} catch (error) {
+					hintEl.textContent = error.message;
+					await delay(2000);
+					continue;
+				}
+				if (data.authorized) {
+					document.body.classList.remove("locked");
+					return data.user || {};
+				}
+				codeEl.textContent = formatGateCode(data.code);
+				const left = Math.max(0, Math.ceil((Number(data.expiresAt) - Date.now()) / 1000));
+				waitEl.textContent = `${left} 秒后更换`;
+				hintEl.textContent = "在群里 @机器人，发送上面的验证码，然后点只有你能按的确认。";
+				await delay(1000);
+			}
+		}
+
+		async function boot() {
+			try {
+				startMap(await ensureAccess());
+			} catch (error) {
+				document.querySelector("#gate-hint").textContent = error.message || "页面没有打开";
+			}
+		}
+
+		function startMap(mapUser) {
 		const dimensionIds = {
 			overworld: "minecraft:overworld",
 			nether: "minecraft:the_nether",
 			end: "minecraft:the_end",
 		};
+		const dimensionNames = {
+			"minecraft:overworld": "主世界",
+			"minecraft:the_nether": "下界",
+			"minecraft:the_end": "末地",
+		};
+		const themes = [
+			["parchment", "羊皮纸"],
+			["dark", "深色"],
+			["amoled", "纯黑"],
+			["light", "浅色"],
+		];
 		const statusEl = document.querySelector("#status");
 		const dimensionEl = document.querySelector("#dimension");
+		const readX = document.querySelector("#read-x");
+		const readZ = document.querySelector("#read-z");
+		let shownX = null;
+		let shownZ = null;
+		const themeButton = document.querySelector("#theme");
+		const gridButton = document.querySelector("#grid");
+		const compassIcon = document.querySelector("#compass-icon");
+		const followPill = document.querySelector("#follow-pill");
+		const followName = document.querySelector("#follow-name");
+		const flash = document.querySelector("#flash");
+		try {
+			const savedDim = localStorage.getItem("sgu-map-dim");
+			if (savedDim && Object.hasOwn(dimensionIds, savedDim)) dimensionEl.value = savedDim;
+		} catch {
+			/* 读不到上次的维度时，仍从主世界开始。 */
+		}
+		const zoomRange = { min: -2, max: 3 };
 		const map = L.map("map", {
 			crs: L.extend({}, L.CRS.Simple, { transformation: new L.Transformation(1, 0, 1, 0) }),
-			minZoom: 0,
-			maxZoom: 0,
-			zoomControl: true,
+			minZoom: zoomRange.min,
+			maxZoom: zoomRange.max,
+			zoomSnap: 1,
+			zoomAnimationThreshold: zoomRange.max - zoomRange.min,
+			zoomControl: false,
 			attributionControl: true,
 			fadeAnimation: false,
+			markerZoomAnimation: true,
 		});
+		L.control.zoom({ position: "bottomright" }).addTo(map);
 		map.setView([0, 0], 0);
 		let revision = 0;
+		let serverBoot = "";
+		let rotation = 0;
+		let showGrid = false;
+		let followKey = "";
 		const markers = L.layerGroup().addTo(map);
 		const pins = L.layerGroup().addTo(map);
-		const placeEl = document.querySelector("#place");
+		const grid = L.layerGroup().addTo(map);
 		let players = [];
+		const blobLoads = new Map();
+
+		try {
+			showGrid = localStorage.getItem("sgu-map-grid") === "1";
+		} catch {
+			showGrid = false;
+		}
+
+		function readTheme() {
+			try {
+				const saved = localStorage.getItem("sgu-map-theme");
+				if (themes.some(([id]) => id === saved)) return saved;
+			} catch {
+				/* 主题保存失败时使用羊皮纸。 */
+			}
+			return "parchment";
+		}
+
+		function applyTheme(name) {
+			const theme = themes.some(([id]) => id === name) ? name : "parchment";
+			document.body.dataset.theme = theme;
+			themeButton.textContent = themes.find(([id]) => id === theme)[1];
+			try {
+				localStorage.setItem("sgu-map-theme", theme);
+			} catch {
+				/* 浏览器不让保存时，这次选择仍然生效。 */
+			}
+			redrawGrid();
+		}
+
+		function unrotate(point) {
+			if (!rotation) return point;
+			const size = map.getSize();
+			const cx = size.x / 2;
+			const cy = size.y / 2;
+			const dx = point.x - cx;
+			const dy = point.y - cy;
+			const cos = Math.cos(rotation);
+			const sin = Math.sin(rotation);
+			return L.point(cx + dx * cos + dy * sin, cy - dx * sin + dy * cos);
+		}
+
+		const mouseEventToContainerPoint = map.mouseEventToContainerPoint.bind(map);
+		map.mouseEventToContainerPoint = (event) => unrotate(mouseEventToContainerPoint(event));
+
+		// 图层整体转了 rotation，屏幕上的位移要反着转回去才是图层该挪的量。
+		function screenToPane(offset) {
+			if (!rotation) return offset;
+			const cos = Math.cos(rotation);
+			const sin = Math.sin(rotation);
+			return L.point(offset.x * cos + offset.y * sin, -offset.x * sin + offset.y * cos);
+		}
+
+		const paneDrag = map.dragging?._draggable;
+		if (paneDrag) {
+			paneDrag.on("predrag", function () {
+				if (!rotation || !this._startPos || !this._newPos || this._newPos === this._turnedPos) return;
+				this._newPos = this._startPos.add(screenToPane(this._newPos.subtract(this._startPos)));
+				this._turnedPos = this._newPos;
+			});
+		}
+
+		let keyPan = false;
+		const panBy = map.panBy.bind(map);
+		map.panBy = (offset, options) => panBy(keyPan ? screenToPane(L.point(offset)) : offset, options);
+		map.getContainer().addEventListener("keydown", (event) => {
+			if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+			keyPan = true;
+			setTimeout(() => { keyPan = false; }, 0);
+		}, true);
+
+		function applyTurn() {
+			if (map._animatingZoom) return;
+			const pane = map.getPane("mapPane");
+			if (!pane || typeof map._getMapPanePos !== "function") return;
+			const pos = map._getMapPanePos();
+			const size = map.getSize();
+			const degrees = rotation * 180 / Math.PI;
+			map.getContainer().style.setProperty("--turn", degrees.toFixed(3));
+			pane.style.transformOrigin = `${size.x / 2 - pos.x}px ${size.y / 2 - pos.y}px`;
+			const turn = Math.abs(rotation) < 0.0001 ? "" : ` rotate(${rotation}rad)`;
+			pane.style.transform = `translate3d(${pos.x}px, ${pos.y}px, 0)${turn}`;
+			compassIcon.style.transform = `rotate(${-degrees}deg)`;
+		}
+
+		map.on("move zoom viewreset resize", applyTurn);
 
 		function parseCoord(value) {
 			const text = String(value).trim().replace(/,/g, "");
-			if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(text)) {
-				return null;
-			}
+			if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(text)) return null;
 			const number = Number(text);
 			return Number.isFinite(number) ? number : null;
 		}
 
 		function formatCoord(value) {
-			if (Number.isInteger(value)) {
-				return String(value);
-			}
-			return String(Math.round(value * 10) / 10);
+			const number = Number(value);
+			if (!Number.isFinite(number)) return "0";
+			return String(Math.round(number * 100) / 100);
+		}
+
+		function escapeHtml(text) {
+			return String(text).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+		}
+
+		function moveTo(x, z) {
+			map.setView([z, x], map.getZoom(), { animate: false });
 		}
 
 		function showArea(x, z) {
-			map.setView([z, x], 0);
+			stopFollowing();
+			moveTo(x, z);
 			pins.clearLayers();
 			const marker = L.circleMarker([z, x], {
 				radius: 6,
@@ -123,11 +582,10 @@
 			marker.bindTooltip(`${formatCoord(x)}, ${formatCoord(z)}`, {
 				permanent: true,
 				direction: "right",
-				className: "player-label",
+				className: "spot-label",
 				offset: [8, 0],
 			});
 			marker.addTo(pins);
-			placeEl.textContent = `X ${formatCoord(x)}  Z ${formatCoord(z)}`;
 		}
 
 		document.querySelector("#goto").addEventListener("submit", (event) => {
@@ -135,11 +593,28 @@
 			const x = parseCoord(document.querySelector("#coord-x").value);
 			const z = parseCoord(document.querySelector("#coord-z").value);
 			if (x === null || z === null) {
-				placeEl.textContent = "请输入数字坐标";
+				statusEl.textContent = "请输入数字坐标";
 				return;
 			}
 			showArea(x, z);
 		});
+
+		document.querySelector("#origin").addEventListener("click", () => showArea(0, 0));
+
+		// tile-sources
+		function tileSources(coords) {
+			return [{ tx: coords.x, ty: coords.y, sx: 0, sy: 0, sw: 256, sh: 256, dx: 0, dy: 0, dw: 256, dh: 256 }];
+		}
+		// end-tile-sources
+
+		function pixelPad(tileZoom) {
+			if (Math.abs(rotation) < 0.0001) return { x: 0, y: 0 };
+			const size = map.getSize();
+			const tileScale = 2 ** ((tileZoom ?? map.getZoom()) - map.getZoom());
+			const x = Math.ceil(Math.max(0, Math.abs(size.x * Math.cos(rotation)) + Math.abs(size.y * Math.sin(rotation)) - size.x) / 2);
+			const y = Math.ceil(Math.max(0, Math.abs(size.x * Math.sin(rotation)) + Math.abs(size.y * Math.cos(rotation)) - size.y) / 2);
+			return { x: x * tileScale, y: y * tileScale };
+		}
 
 		function createLayer() {
 			return new (L.GridLayer.extend({
@@ -147,10 +622,25 @@
 					const canvas = document.createElement("canvas");
 					canvas.width = 256;
 					canvas.height = 256;
-					paintCanvas(canvas, `/tiles/${dimensionEl.value}/0/${coords.x}/${coords.y}.webp?v=${revision}`);
+					paintTile(canvas, coords);
 					return canvas;
 				},
-			}))({ tileSize: 256, noWrap: true });
+				_getTiledPixelBounds(center) {
+					const bounds = L.GridLayer.prototype._getTiledPixelBounds.call(this, center);
+					const pad = pixelPad(this._tileZoom);
+					if (!pad.x && !pad.y) return bounds;
+					return L.bounds(bounds.min.subtract([pad.x, pad.y]), bounds.max.add([pad.x, pad.y]));
+				},
+			}))({
+				tileSize: 256,
+				noWrap: true,
+				keepBuffer: 2,
+				// 图块层默认 minZoom 是 0。缩放到 0 以下时它会把图块全部卸掉，这里要跟地图一样能缩到最远。
+				minZoom: zoomRange.min,
+				maxZoom: zoomRange.max,
+				minNativeZoom: 0,
+				maxNativeZoom: 0,
+			});
 		}
 
 		const swapQueue = [];
@@ -158,15 +648,26 @@
 		let decoding = 0;
 		let framePending = false;
 
-		function paintCanvas(canvas, url) {
+		function paintTile(canvas, coords) {
+			const sources = tileSources(coords);
+			const stamp = revision;
+			const url = `${dimensionEl.value}/${stamp}/` + sources.map((source) => [source.tx, source.ty, source.sx, source.sy, source.sw, source.sh, source.dx, source.dy, source.dw, source.dh].join(",")).join("|");
+			canvas.dataset.parents = [...new Set(sources.map((source) => `${source.tx},${source.ty}`))].join(" ");
+			paintCanvas(canvas, url, sources, stamp, dimensionEl.value);
+		}
+
+		function paintCanvas(canvas, url, sources, stamp, dim) {
 			if (canvas.dataset.shown === url || canvas.dataset.next === url) return;
 			canvas.dataset.next = url;
 			const queued = swapQueue.find((item) => item.canvas === canvas);
 			if (queued) {
 				queued.url = url;
+				queued.sources = sources;
+				queued.stamp = stamp;
+				queued.dim = dim;
 				return;
 			}
-			swapQueue.push({ canvas, url });
+			swapQueue.push({ canvas, url, sources, stamp, dim });
 			pumpSwaps();
 		}
 
@@ -194,109 +695,530 @@
 			});
 		}
 
-		async function decodeSwap(job) {
-			const url = job.url;
+		function loadBlob(url) {
+			const existing = blobLoads.get(url);
+			if (existing) return existing;
+			const pending = (async () => {
+				const response = await fetch(url, { cache: "no-store" });
+				if (!response.ok) {
+					const error = new Error("图块加载失败");
+					error.pending = response.status === 404;
+					throw error;
+				}
+				return response.blob();
+			})();
+			blobLoads.set(url, pending);
+			pending.finally(() => {
+				if (blobLoads.get(url) === pending) blobLoads.delete(url);
+			});
+			return pending;
+		}
+
+		async function bitmapFrom(blob) {
 			try {
-				const response = await fetch(url);
-				if (!response.ok) throw new Error("图块加载失败");
-				const blob = await response.blob();
-				if (job.canvas.dataset.next !== url) return null;
-				let bitmap = null;
+				return await createImageBitmap(blob);
+			} catch {
+				const image = new Image();
+				const objectUrl = URL.createObjectURL(blob);
 				try {
-					bitmap = await createImageBitmap(blob);
-				} catch {
-					const image = new Image();
-					const objectUrl = URL.createObjectURL(blob);
 					image.src = objectUrl;
 					await image.decode();
+					return image;
+				} finally {
 					URL.revokeObjectURL(objectUrl);
-					bitmap = image;
+				}
+			}
+		}
+
+		async function decodeSwap(job) {
+			const url = job.url;
+			const parts = [];
+			try {
+				for (const source of job.sources) {
+					const tileUrl = `/tiles/${job.dim}/0/${source.tx}/${source.ty}.webp?v=${job.stamp}`;
+					const blob = await loadBlob(tileUrl);
+					if (job.canvas.dataset.next !== url) {
+						for (const part of parts) part.bitmap.close?.();
+						return null;
+					}
+					parts.push({ source, bitmap: await bitmapFrom(blob) });
 				}
 				if (job.canvas.dataset.next !== url) {
-					bitmap.close?.();
+					for (const part of parts) part.bitmap.close?.();
 					return null;
 				}
-				return { canvas: job.canvas, url, bitmap };
-			} catch {
+				return { canvas: job.canvas, url, parts };
+			} catch (error) {
+				for (const part of parts) part.bitmap.close?.();
 				if (job.canvas.dataset.next === url) delete job.canvas.dataset.next;
+				if (error.pending && job.canvas.isConnected) {
+					setTimeout(() => {
+						if (!job.canvas.isConnected || job.canvas.dataset.shown === url) return;
+						if (job.canvas.dataset.next && job.canvas.dataset.next !== url) return;
+						paintCanvas(job.canvas, url, job.sources, job.stamp, job.dim);
+					}, 1000);
+				}
 				return null;
 			}
 		}
 
 		function commitSwap(item) {
 			if (item.canvas.dataset.next !== item.url) {
-				item.bitmap.close?.();
+				for (const part of item.parts) part.bitmap.close?.();
 				return;
 			}
-			item.canvas.getContext("2d").drawImage(item.bitmap, 0, 0);
-			item.bitmap.close?.();
+			const ctx = item.canvas.getContext("2d");
+			ctx.imageSmoothingEnabled = false;
+			ctx.clearRect(0, 0, item.canvas.width, item.canvas.height);
+			for (const part of item.parts) {
+				const source = part.source;
+				ctx.drawImage(part.bitmap, source.sx, source.sy, source.sw, source.sh, source.dx, source.dy, source.dw, source.dh);
+				part.bitmap.close?.();
+			}
 			item.canvas.dataset.shown = item.url;
 			delete item.canvas.dataset.next;
 		}
 
 		function refreshTiles(paths) {
 			const dim = dimensionEl.value;
-			const seen = new Set();
+			const wanted = new Set();
 			for (const path of paths) {
 				const parts = path.split("/");
-				if (parts.length !== 4 || parts[0] !== dim || parts[1] !== "0" || seen.has(path)) {
-					continue;
-				}
-				seen.add(path);
-				const tile = layer._tiles?.[`${parts[2]}:${parts[3]}:0`];
-				if (!tile?.el) continue;
-				paintCanvas(tile.el, `/tiles/${path}.webp?v=${revision}`);
+				if (parts.length === 4 && parts[0] === dim && parts[1] === "0") wanted.add(`${parts[2]},${parts[3]}`);
+			}
+			if (wanted.size === 0) return;
+			for (const tile of Object.values(layer._tiles || {})) {
+				const parents = tile.el?.dataset.parents;
+				if (!parents || !parents.split(" ").some((key) => wanted.has(key))) continue;
+				paintTile(tile.el, tile.coords);
 			}
 		}
 
 		let layer = createLayer();
 		layer.addTo(map);
 
-		dimensionEl.addEventListener("change", () => {
+		function resetLayer() {
 			swapQueue.length = 0;
 			readySwaps.length = 0;
 			map.removeLayer(layer);
 			layer = createLayer();
 			layer.addTo(map);
 			drawPlayers();
+		}
+
+		dimensionEl.addEventListener("change", () => {
+			try {
+				localStorage.setItem("sgu-map-dim", dimensionEl.value);
+			} catch {
+				/* 维度仍然已经切换。 */
+			}
+			resetLayer();
+			renderRoster();
+			redrawGrid();
 		});
+
+		function isSelf(player) {
+			const minecraftId = String(mapUser.minecraftId || "");
+			return minecraftId !== "" && player.name?.toLowerCase() === minecraftId.toLowerCase();
+		}
 
 		function drawPlayers() {
 			markers.clearLayers();
 			const want = dimensionIds[dimensionEl.value];
 			for (const player of players) {
 				if (player.dimension !== want) continue;
-				const marker = L.circleMarker([player.z, player.x], {
-					radius: 6,
-					color: player.fake ? "#c47b2b" : "#1f6feb",
-					weight: 2,
-					fillColor: player.fake ? "#f0c37a" : "#8ec5ff",
-					fillOpacity: 1,
+				const mine = isSelf(player);
+				const yaw = Number(player.yaw) || 0;
+				const kind = mine ? "self" : player.fake ? "fake" : "real";
+				const name = mine ? `${player.name} · 我` : player.name;
+				const icon = L.divIcon({
+					className: "leaflet-div-icon pin",
+					iconSize: [18, 18],
+					iconAnchor: [9, 9],
+					html: `<span class="pin-arrow" data-kind="${kind}" style="transform:rotate(${yaw + 180}deg)"></span><span class="pin-name">${escapeHtml(name)}</span>`,
 				});
-				marker.bindTooltip(player.name, { permanent: true, direction: "top", className: "player-label", offset: [0, -8] });
-				marker.addTo(markers);
+				L.marker([player.z, player.x], { icon, interactive: false, keyboard: false }).addTo(markers);
+			}
+		}
+
+		function startFollow(player) {
+			followKey = playerKey(player);
+			followName.textContent = player.name;
+			followPill.hidden = false;
+		}
+
+		function stopFollowing() {
+			followKey = "";
+			followPill.hidden = true;
+		}
+
+		function viewPlayer(player, follow) {
+			const dim = Object.keys(dimensionIds).find((key) => dimensionIds[key] === player.dimension);
+			if (dim && dimensionEl.value !== dim) {
+				dimensionEl.value = dim;
+				dimensionEl.dispatchEvent(new Event("change"));
+			}
+			moveTo(player.x, player.z);
+			if (follow) startFollow(player);
+		}
+
+		function keepFollow() {
+			if (!followKey) return;
+			const player = players.find((item) => playerKey(item) === followKey);
+			if (!player) {
+				stopFollowing();
+				return;
+			}
+			followName.textContent = player.name;
+			const dim = Object.keys(dimensionIds).find((key) => dimensionIds[key] === player.dimension);
+			const dimChanged = dim && dimensionEl.value !== dim;
+			if (dimChanged) {
+				dimensionEl.value = dim;
+				dimensionEl.dispatchEvent(new Event("change"));
+			}
+			const center = map.getCenter();
+			if (dimChanged || Math.abs(center.lng - player.x) > 0.4 || Math.abs(center.lat - player.z) > 0.4) {
+				moveTo(player.x, player.z);
 			}
 		}
 
 		document.querySelector("#follow").addEventListener("click", () => {
 			const want = dimensionIds[dimensionEl.value];
-			const player = players.find((item) => item.dimension === want && !item.fake) || players.find((item) => item.dimension === want);
-			if (player) map.setView([player.z, player.x], 0);
+			const player = players.find((item) => isSelf(item))
+				|| players.find((item) => item.dimension === want && !item.fake)
+				|| players.find((item) => !item.fake)
+				|| players[0];
+			if (player) viewPlayer(player, true);
+		});
+		document.querySelector("#unfollow").addEventListener("click", stopFollowing);
+		map.on("dragstart", stopFollowing);
+
+		function redrawGrid() {
+			grid.clearLayers();
+			gridButton.classList.toggle("active", showGrid);
+			gridButton.setAttribute("aria-pressed", showGrid ? "true" : "false");
+			if (!showGrid) return;
+			const bounds = map.getBounds().pad(0.15);
+			const west = bounds.getWest();
+			const east = bounds.getEast();
+			const north = bounds.getNorth();
+			const south = bounds.getSouth();
+			const scale = 2 ** map.getZoom();
+			const pad = pixelPad(map.getZoom());
+			const step = 16 * scale >= 6 ? 16 : 64 * scale >= 6 ? 64 : 256;
+			const x0 = Math.floor((west - pad.x / scale) / step) * step;
+			const x1 = Math.ceil((east + pad.x / scale) / step) * step;
+			const z0 = Math.floor((south - pad.y / scale) / step) * step;
+			const z1 = Math.ceil((north + pad.y / scale) / step) * step;
+			const color = getComputedStyle(document.body).getPropertyValue("--grid").trim() || "rgba(255,255,255,0.35)";
+			for (let x = x0; x <= x1; x += step) {
+				L.polyline([[z0, x], [z1, x]], { color, weight: 1, interactive: false, opacity: 0.9 }).addTo(grid);
+			}
+			for (let z = z0; z <= z1; z += step) {
+				L.polyline([[z, x0], [z, x1]], { color, weight: 1, interactive: false, opacity: 0.9 }).addTo(grid);
+			}
+		}
+
+		function toggleGrid() {
+			showGrid = !showGrid;
+			try {
+				localStorage.setItem("sgu-map-grid", showGrid ? "1" : "0");
+			} catch {
+				/* 网格开关仍然已经切换。 */
+			}
+			redrawGrid();
+		}
+
+		gridButton.addEventListener("click", toggleGrid);
+		map.on("moveend zoomend", redrawGrid);
+
+		function refreshCoverage() {
+			redrawGrid();
+			if (layer?._map && typeof layer._update === "function") layer._update();
+		}
+
+		function resetRotation() {
+			rotation = 0;
+			applyTurn();
+			refreshCoverage();
+		}
+
+		document.querySelector("#compass").addEventListener("click", resetRotation);
+		themeButton.addEventListener("click", () => {
+			const index = themes.findIndex(([id]) => id === document.body.dataset.theme);
+			applyTheme(themes[(index + 1) % themes.length][0]);
 		});
 
+		const container = map.getContainer();
+		let turning = false;
+		let turnStart = 0;
+		let rotationAtStart = 0;
+		container.addEventListener("contextmenu", (event) => event.preventDefault());
+		container.addEventListener("pointerdown", (event) => {
+			if (!(event.button === 2 || (event.button === 0 && event.ctrlKey))) return;
+			event.preventDefault();
+			event.stopPropagation();
+			turning = true;
+			const rect = container.getBoundingClientRect();
+			turnStart = Math.atan2(event.clientY - (rect.top + rect.height / 2), event.clientX - (rect.left + rect.width / 2));
+			rotationAtStart = rotation;
+			container.setPointerCapture(event.pointerId);
+		}, true);
+		container.addEventListener("pointermove", (event) => {
+			if (!turning) return;
+			const rect = container.getBoundingClientRect();
+			const angle = Math.atan2(event.clientY - (rect.top + rect.height / 2), event.clientX - (rect.left + rect.width / 2));
+			rotation = rotationAtStart + (angle - turnStart);
+			applyTurn();
+		});
+		function endTurn() {
+			if (!turning) return;
+			turning = false;
+			refreshCoverage();
+		}
+		container.addEventListener("pointerup", endTurn);
+		container.addEventListener("pointercancel", endTurn);
+
+		function showCursor(x, z) {
+			const nextX = Math.round(x);
+			const nextZ = Math.round(z);
+			if (nextX === shownX && nextZ === shownZ) return;
+			shownX = nextX;
+			shownZ = nextZ;
+			readX.textContent = String(nextX);
+			readZ.textContent = String(nextZ);
+		}
+
+		map.on("mousemove", (event) => {
+			showCursor(event.latlng.lng, event.latlng.lat);
+		});
+
+		function rotateAround(x, y, cx, cy, angle) {
+			const dx = x - cx;
+			const dy = y - cy;
+			const cos = Math.cos(angle);
+			const sin = Math.sin(angle);
+			return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos];
+		}
+
+		function takeScreenshot() {
+			const size = map.getSize();
+			const ratio = Math.min(window.devicePixelRatio || 1, 2);
+			const out = document.createElement("canvas");
+			out.width = Math.max(1, Math.round(size.x * ratio));
+			out.height = Math.max(1, Math.round(size.y * ratio));
+			const ctx = out.getContext("2d");
+			ctx.scale(ratio, ratio);
+			ctx.imageSmoothingEnabled = false;
+			ctx.fillStyle = getComputedStyle(document.querySelector("#map")).backgroundColor || "#c8b282";
+			ctx.fillRect(0, 0, size.x, size.y);
+			ctx.save();
+			ctx.translate(size.x / 2, size.y / 2);
+			ctx.rotate(rotation);
+			ctx.translate(-size.x / 2, -size.y / 2);
+			for (const tile of Object.values(layer._tiles || {})) {
+				if (!(tile.el instanceof HTMLCanvasElement) || !tile.coords) continue;
+				const world = 256 / (2 ** tile.coords.z);
+				const point = map.latLngToContainerPoint([tile.coords.y * world, tile.coords.x * world]);
+				const shown = 256 * 2 ** (map.getZoom() - tile.coords.z);
+				ctx.drawImage(tile.el, point.x, point.y, shown, shown);
+			}
+			const want = dimensionIds[dimensionEl.value];
+			for (const player of players) {
+				if (player.dimension !== want) continue;
+				const point = map.latLngToContainerPoint([player.z, player.x]);
+				ctx.save();
+				ctx.translate(point.x, point.y);
+				ctx.rotate(((Number(player.yaw) || 0) + 180) * Math.PI / 180);
+				ctx.fillStyle = player.fake ? "#f0c37a" : "#8ec5ff";
+				ctx.beginPath();
+				ctx.moveTo(0, -9);
+				ctx.lineTo(5, 6);
+				ctx.lineTo(-5, 6);
+				ctx.closePath();
+				ctx.fill();
+				ctx.restore();
+			}
+			ctx.restore();
+			ctx.font = "12px sans-serif";
+			ctx.lineWidth = 3;
+			ctx.strokeStyle = "rgba(255,255,255,0.9)";
+			ctx.fillStyle = "#1d1a16";
+			for (const player of players) {
+				if (player.dimension !== want) continue;
+				const point = map.latLngToContainerPoint([player.z, player.x]);
+				const [sx, sy] = rotateAround(point.x, point.y, size.x / 2, size.y / 2, rotation);
+				const label = player.name;
+				ctx.strokeText(label, sx + 8, sy - 8);
+				ctx.fillText(label, sx + 8, sy - 8);
+			}
+			flash.style.opacity = "0.8";
+			setTimeout(() => { flash.style.opacity = "0"; }, 140);
+			const link = document.createElement("a");
+			const dimLabel = dimensionEl.selectedOptions[0]?.textContent || dimensionEl.value;
+			link.download = `地图-${dimLabel}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.png`;
+			link.href = out.toDataURL("image/png");
+			link.click();
+		}
+
+		document.querySelector("#shot").addEventListener("click", takeScreenshot);
+
+		const roster = document.querySelector("#roster");
+		const rosterBody = document.querySelector("#roster-body");
+		const rosterCount = document.querySelector("#roster-count");
+		const rosterChevron = document.querySelector("#roster-chevron");
+		const rosterToggle = document.querySelector("#roster-toggle");
+		const rosterPlayers = document.querySelector("#roster-players");
+		const rosterFakes = document.querySelector("#roster-fakes");
+		let rosterOpen = true;
+		try {
+			rosterOpen = sessionStorage.getItem("sgu-roster-open") !== "0";
+		} catch {
+			rosterOpen = true;
+		}
+
+		function playerKey(player) {
+			return player.uuid || `${player.name}|${player.fake ? "fake" : "player"}`;
+		}
+
+		function applyRosterOpen() {
+			roster.classList.toggle("collapsed", !rosterOpen);
+			rosterToggle.setAttribute("aria-expanded", rosterOpen ? "true" : "false");
+			rosterChevron.textContent = rosterOpen ? "▾" : "▸";
+			try {
+				sessionStorage.setItem("sgu-roster-open", rosterOpen ? "1" : "0");
+			} catch {
+				/* 浏览器不允许保存折叠状态时，当前这次展开仍然有效。 */
+			}
+		}
+
+		function copyWithTextarea(text) {
+			const area = document.createElement("textarea");
+			area.value = text;
+			area.setAttribute("readonly", "");
+			area.style.position = "fixed";
+			area.style.left = "-9999px";
+			document.body.append(area);
+			area.select();
+			const copied = document.execCommand("copy");
+			area.remove();
+			return copied;
+		}
+
+		function copyCoords(player, button) {
+			const text = `${formatCoord(player.x)} ${formatCoord(player.y)} ${formatCoord(player.z)}`;
+			const fallback = copyWithTextarea(text);
+			const show = (copied) => {
+				const token = String((Number(button.dataset.flash) || 0) + 1);
+				button.dataset.flash = token;
+				button.textContent = copied ? "已复制" : "失败";
+				setTimeout(() => {
+					if (button.dataset.flash === token) button.textContent = "复制";
+				}, 1200);
+			};
+			if (navigator.clipboard?.writeText) {
+				navigator.clipboard.writeText(text).then(() => show(true), () => show(fallback));
+				return;
+			}
+			show(fallback);
+		}
+
+		function updateRow(row, player) {
+			row.dataset.fake = player.fake ? "1" : "0";
+			row.dataset.self = isSelf(player) ? "1" : "0";
+			row.querySelector(".roster-label").textContent = isSelf(player) ? `${player.name} · 我` : player.name;
+			const where = dimensionNames[player.dimension] || "其他维度";
+			row.querySelector(".roster-meta").textContent = `${where}  ${formatCoord(player.x)}, ${formatCoord(player.y)}, ${formatCoord(player.z)}`;
+			row.querySelector("[data-action='jump']").setAttribute("aria-label", `跟随${player.name}`);
+			row.querySelector("[data-action='copy']").setAttribute("aria-label", `复制${player.name}的坐标`);
+		}
+
+		function createRow(player) {
+			const row = document.createElement("li");
+			row.className = "roster-row";
+			row.dataset.key = playerKey(player);
+			row.innerHTML = `<div class="roster-main"><span class="roster-name"><span class="roster-label"></span></span><span class="roster-meta"></span></div><div class="roster-actions"><button type="button" data-action="jump">跟随</button><button type="button" data-action="copy">复制</button></div>`;
+			updateRow(row, player);
+			return row;
+		}
+
+		function syncList(listEl, entries, emptyLabel) {
+			if (entries.length === 0) {
+				listEl.replaceChildren();
+				const empty = document.createElement("p");
+				empty.className = "roster-empty";
+				empty.textContent = emptyLabel;
+				listEl.append(empty);
+				return;
+			}
+			const wanted = new Set(entries.map(playerKey));
+			for (const child of [...listEl.children]) {
+				if (!wanted.has(child.dataset.key)) child.remove();
+			}
+			let previous = null;
+			for (const player of entries) {
+				const key = playerKey(player);
+				let row = [...listEl.children].find((child) => child.dataset.key === key);
+				if (!row) row = createRow(player);
+				else updateRow(row, player);
+				const anchor = previous ? previous.nextSibling : listEl.firstChild;
+				if (row !== anchor) listEl.insertBefore(row, anchor);
+				previous = row;
+			}
+		}
+
+		function renderRoster() {
+			const reals = players.filter((player) => !player.fake).sort((a, b) => a.name.localeCompare(b.name, "zh"));
+			const fakes = players.filter((player) => player.fake).sort((a, b) => a.name.localeCompare(b.name, "zh"));
+			rosterCount.textContent = `玩家 ${reals.length} · 假人 ${fakes.length}`;
+			syncList(rosterPlayers, reals, "当前没有玩家");
+			syncList(rosterFakes, fakes, "当前没有假人");
+		}
+
+		rosterToggle.addEventListener("click", () => {
+			rosterOpen = !rosterOpen;
+			applyRosterOpen();
+		});
+		rosterBody.addEventListener("click", (event) => {
+			const button = event.target.closest("[data-action]");
+			if (!button) return;
+			const key = button.closest(".roster-row")?.dataset.key;
+			const player = players.find((item) => playerKey(item) === key);
+			if (!player) return;
+			if (button.dataset.action === "jump") viewPlayer(player, true);
+			if (button.dataset.action === "copy") copyCoords(player, button);
+		});
+		applyRosterOpen();
+		renderRoster();
+		applyTheme(readTheme());
+		redrawGrid();
+		applyTurn();
+
 		let mapError = "";
+		function connectionStatus(base) {
+			const who = mapUser.nickname || mapUser.username || "";
+			return who ? `${base} · ${who}` : base;
+		}
+
 		function connect() {
 			const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
-			socket.onopen = () => { if (!mapError) statusEl.textContent = "已连接"; };
+			socket.onopen = () => { if (!mapError) statusEl.textContent = connectionStatus("已连接"); };
 			socket.onclose = () => {
-				statusEl.textContent = "连接断开，正在重试";
+				statusEl.textContent = connectionStatus("连接断开，正在重试");
 				setTimeout(connect, 2000);
 			};
 			socket.onmessage = (event) => {
-				const data = JSON.parse(event.data);
+				let data;
+				try {
+					data = JSON.parse(event.data);
+				} catch {
+					return;
+				}
 				players = data.players || [];
+				keepFollow();
 				drawPlayers();
-				if (!mapError) statusEl.textContent = data.error ? "模组未连接，地图仍可浏览" : "已连接";
+				renderRoster();
+				if (!mapError) statusEl.textContent = connectionStatus(data.error ? "模组未连接，地图仍可浏览" : "已连接");
 			};
 		}
 		connect();
@@ -314,8 +1236,12 @@
 					mapError = "";
 				}
 				const previous = revision;
+				const restarted = Boolean(serverBoot && changes.boot && changes.boot !== serverBoot);
+				serverBoot = changes.boot || serverBoot;
 				revision = changes.revision;
-				if (changes.revision !== previous && changes.tiles.length) {
+				if (changes.reset || restarted) {
+					resetLayer();
+				} else if (changes.revision !== previous && changes.tiles.length) {
 					refreshTiles(changes.tiles);
 				}
 			} catch (error) {
@@ -323,11 +1249,22 @@
 			}
 		}
 		setInterval(() => {
-			if (!document.hidden) {
-				pollMap();
-			}
+			if (!document.hidden) pollMap();
 		}, 400);
 		pollMap();
+		setInterval(async () => {
+			try {
+				const data = await fetch("/api/session").then((res) => res.json());
+				if (!data.authorized) return;
+				mapUser = data.user || mapUser;
+				drawPlayers();
+				renderRoster();
+				if (!mapError) statusEl.textContent = connectionStatus(statusEl.textContent.split(" · ")[0] || "已连接");
+			} catch {
+				/* 身份刷新失败时继续使用已经绑定的信息。 */
+			}
+		}, 15000);
+		}
 	</script>
 </body>
 </html>

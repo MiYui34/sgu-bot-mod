@@ -9,7 +9,7 @@ parentPort.on("message", async (job) => {
 			body = new Uint8Array(result.body.byteLength);
 			body.set(result.body);
 		}
-		parentPort.postMessage({ id: job.id, painted: Boolean(body), body }, body ? [body.buffer] : []);
+		parentPort.postMessage({ id: job.id, painted: Boolean(body), missing: Boolean(result.missing), body }, body ? [body.buffer] : []);
 	} catch (error) {
 		parentPort.postMessage({ id: job.id, error: error.message || "绘制失败" });
 	}

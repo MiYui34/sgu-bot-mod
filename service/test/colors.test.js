@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { chunkIndex, readChunkNbtFromBuffer, writeTestRegion } from "../src/map/anvil.js";
-import { colorOf, surfaceColors } from "../src/map/colors.js";
+import { colorOf, reshadeNorthEdge, surfaceColors } from "../src/map/colors.js";
 import { encodeNbt, readMapChunk, tags } from "../src/map/nbt.js";
 
 function packAligned(indices, bits) {
@@ -32,9 +32,9 @@ test("5 位调色板按 long 对齐后，方块落在正确的坐标", () => {
 			block_states: { palette, data: packAligned(indices, 5) },
 		}],
 	});
-	assert.deepEqual(colors[z * 16 + x], [247, 233, 163, 255]);
-	assert.deepEqual(colors[0], [112, 112, 112, 255]);
-	assert.equal(colors.filter((color) => color && color[0] === 247).length, 1);
+	assert.deepEqual(colors[z * 16 + x], [213, 201, 140, 255]);
+	assert.deepEqual(colors[0], [96, 96, 96, 255]);
+	assert.equal(colors.filter((color) => color && color[0] === 213).length, 1);
 });
 
 function packSamples(values, bits) {
@@ -103,7 +103,7 @@ test("高度图只读取地表所在的段", async () => {
 	assert.deepEqual(root.sections.map((section) => section.Y), [4]);
 	const colors = surfaceColors(root);
 	assert.deepEqual(colors[z * 16 + x], [247, 233, 163, 255]);
-	assert.deepEqual(colors[0], [112, 112, 112, 255]);
+	assert.deepEqual(colors[0], [96, 96, 96, 255]);
 	assert.equal(colors.filter((color) => color && color[0] === 247).length, 1);
 	assert.equal(colors.some((color) => color && color[0] === 151 && color[1] === 109), false);
 });
@@ -120,15 +120,43 @@ test("没有高度图时仍按整段从上往下取地表", () => {
 		]),
 	}), -64);
 	assert.equal(root.columns, null);
-	assert.deepEqual(surfaceColors(root)[0], [112, 112, 112, 255]);
+	assert.deepEqual(surfaceColors(root)[0], [96, 96, 96, 255]);
 });
 
-test("方块颜色使用原版登记色，玻璃不占地表", () => {
+test("方块颜色使用 1.21.9 地图色的四个状态，玻璃不占地表", () => {
 	assert.deepEqual(colorOf("minecraft:stone"), [112, 112, 112, 255]);
-	assert.deepEqual(colorOf("minecraft:grass_block"), [0x91, 0xbd, 0x59, 255]);
-	assert.deepEqual(colorOf("minecraft:water"), [0x3f, 0x76, 0xe4, 255]);
-	assert.deepEqual(colorOf("minecraft:oak_leaves"), [0x77, 0xab, 0x2f, 255]);
+	assert.deepEqual(colorOf("minecraft:stone", 0), [79, 79, 79, 255]);
+	assert.deepEqual(colorOf("minecraft:stone", 1), [96, 96, 96, 255]);
+	assert.deepEqual(colorOf("minecraft:stone", 3), [59, 59, 59, 255]);
+	assert.deepEqual(colorOf("minecraft:grass_block"), [127, 178, 56, 255]);
+	assert.deepEqual(colorOf("minecraft:water"), [64, 64, 255, 255]);
+	assert.deepEqual(colorOf("minecraft:oak_leaves"), [0, 124, 0, 255]);
 	assert.equal(colorOf("minecraft:glass"), null);
 	assert.deepEqual(colorOf("minecraft:orange_wool"), [216, 127, 51, 255]);
 	assert.deepEqual(colorOf("minecraft:not_a_real_block"), [112, 112, 112, 255]);
+});
+
+test("比北边高用亮色，低两格用最暗色", () => {
+	const columns = new Array(256).fill(8);
+	columns[16] = 10;
+	columns[32] = 7;
+	const colors = surfaceColors({
+		columns,
+		sections: [{
+			Y: 0,
+			block_states: { palette: [{ Name: "minecraft:stone" }] },
+		}],
+	});
+	assert.deepEqual(colors[0], [96, 96, 96, 255]);
+	assert.deepEqual(colors[16], [112, 112, 112, 255]);
+	assert.deepEqual(colors[32], [59, 59, 59, 255]);
+	const north = surfaceColors({
+		columns: new Array(256).fill(20),
+		sections: [{
+			Y: 1,
+			block_states: { palette: [{ Name: "minecraft:stone" }] },
+		}],
+	});
+	reshadeNorthEdge(colors, north.heights.slice(240, 256));
+	assert.deepEqual(colors[0], [59, 59, 59, 255]);
 });

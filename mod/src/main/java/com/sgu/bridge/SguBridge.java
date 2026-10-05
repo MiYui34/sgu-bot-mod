@@ -33,14 +33,22 @@ public final class SguBridge implements ModInitializer {
 	}
 
 	private void onStarted(MinecraftServer server) {
+		RUNTIME.store().setStopping(false);
 		RUNTIME.attach(server);
 		RUNTIME.reconcileFakePlayers();
 		RUNTIME.http().start();
+		RUNTIME.uplink().start();
+		RUNTIME.mapPush().start();
+		RUNTIME.watchConfig();
 	}
 
 	private void onStopping(MinecraftServer server) {
+		RUNTIME.store().setStopping(true);
+		RUNTIME.stopWatching();
+		RUNTIME.mapPush().stop();
+		RUNTIME.uplink().stop();
 		RUNTIME.http().stop();
-		RUNTIME.store().save();
+		RUNTIME.store().flush();
 		RUNTIME.detach();
 	}
 
@@ -50,7 +58,7 @@ public final class SguBridge implements ModInitializer {
 			return;
 		}
 		if (FakePlayers.isFake(player)) {
-			RUNTIME.store().markFakeOffline(player.getGameProfile().name(), RecordStore.now());
+			RUNTIME.store().markFakeOffline(player, RecordStore.now());
 			return;
 		}
 		RUNTIME.store().recordLogout(player);
@@ -70,7 +78,11 @@ public final class SguBridge implements ModInitializer {
 		}
 		boolean changed = false;
 		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-			if (!FakePlayers.isFake(player) && RUNTIME.store().recordSnapshot(player)) {
+			if (FakePlayers.isFake(player)) {
+				if (RUNTIME.store().touchFake(player)) {
+					changed = true;
+				}
+			} else if (RUNTIME.store().recordSnapshot(player)) {
 				changed = true;
 			}
 		}

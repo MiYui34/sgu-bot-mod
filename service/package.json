@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test test/*.test.js"
+    "preload-map": "node scripts/preload-map.js",
+    "push-map": "node scripts/push-map.js",
+    "test": "node --test --test-isolation=none --test-concurrency=1 test/*.test.js"
   },
   "dependencies": {
     "@jsquash/webp": "^1.5.0",

@@ -1,8 +1,10 @@
 import { deflateSync } from "node:zlib";
 import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { decompressChunk, readMapChunk } from "./nbt.js";
 
 const SECTOR = 4096;
+const MAX_EXTERNAL = 64 * 1024 * 1024;
 
 export function chunkIndex(localX, localZ) {
 	return (localX & 31) + (localZ & 31) * 32;
@@ -46,12 +48,18 @@ export async function readChunkNbt(file, index, minY = -64) {
 	return chunkFromRegion(await regionBuffer(file), index, minY);
 }
 
-export async function readRegionChunks(file, indexes, minY = -64) {
+// 单个区块坏了只空出这一格，不连累同一张图里的其它区块。
+export async function readRegionChunks(file, indexes, minY = -64, onError = null) {
 	const buffer = await regionBuffer(file);
 	const found = new Map();
 	const jobs = [];
 	for (const index of indexes) {
-		const located = locateChunk(buffer, index);
+		let located = null;
+		try {
+			located = locateChunk(buffer, index);
+		} catch (error) {
+			onError?.(index, error);
+		}
 		if (!located) {
 			found.set(index, null);
 			continue;
@@ -60,12 +68,37 @@ export async function readRegionChunks(file, indexes, minY = -64) {
 	}
 	for (let start = 0; start < jobs.length; start += 4) {
 		const batch = jobs.slice(start, start + 4);
-		const decoded = await Promise.all(batch.map(async (job) => readMapChunk(await decompressChunk(job.compression, job.payload), minY)));
+		const decoded = await Promise.all(batch.map(async (job) => {
+			try {
+				return readMapChunk(await chunkBytes(file, job), minY);
+			} catch (error) {
+				onError?.(job.index, error);
+				return null;
+			}
+		}));
 		for (let index = 0; index < batch.length; index++) {
 			found.set(batch[index].index, decoded[index]);
 		}
 	}
 	return found;
+}
+
+// 压缩类型最高位表示区块太大，正文放在同目录的 c.<x>.<z>.mcc 里。
+async function chunkBytes(file, job) {
+	if ((job.compression & 0x80) === 0) {
+		return decompressChunk(job.compression, job.payload);
+	}
+	const region = parseRegionName(path.basename(file));
+	if (!region) {
+		throw new Error("区域文件名不对，找不到外置区块");
+	}
+	const coords = chunkCoords(region.regionX, region.regionZ, job.index);
+	const external = path.join(path.dirname(file), `c.${coords.chunkX}.${coords.chunkZ}.mcc`);
+	const body = await readFile(external);
+	if (body.length > MAX_EXTERNAL) {
+		throw new Error(`外置区块太大 ${body.length}`);
+	}
+	return decompressChunk(job.compression & 0x7f, body);
 }
 
 export async function readChunkNbtFromBuffer(buffer, index, minY = -64) {
@@ -76,6 +109,9 @@ async function chunkFromRegion(buffer, index, minY) {
 	const located = locateChunk(buffer, index);
 	if (!located) {
 		return null;
+	}
+	if ((located.compression & 0x80) !== 0) {
+		throw new Error("区块在外置 .mcc 文件里");
 	}
 	return readMapChunk(await decompressChunk(located.compression, located.payload), minY);
 }
@@ -94,6 +130,9 @@ function locateChunk(buffer, index) {
 	}
 	const length = buffer.readUInt32BE(offset);
 	const compression = buffer[offset + 4];
+	if ((compression & 0x80) !== 0 && length >= 1 && length <= MAX_CHUNK && offset + 4 + length <= buffer.length) {
+		return { compression, payload: buffer.subarray(offset + 5, offset + 4 + length) };
+	}
 	if (length <= 1 || length > MAX_CHUNK) {
 		throw new Error(`区块长度异常 ${length}`);
 	}

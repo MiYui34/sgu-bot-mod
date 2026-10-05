@@ -17,8 +17,12 @@ import java.nio.file.StandardCopyOption;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class RecordStore {
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -28,6 +32,19 @@ public final class RecordStore {
 	private final List<JsonObject> logouts = new ArrayList<>();
 	private final List<JsonObject> snapshots = new ArrayList<>();
 	private final List<JsonObject> deaths = new ArrayList<>();
+	private final Map<String, PendingActor> pendingActors = new HashMap<>();
+	private volatile boolean stopping;
+	private static final ExecutorService WRITER = Executors.newSingleThreadExecutor(runnable -> {
+		Thread thread = new Thread(runnable, "sgu-bridge-records");
+		thread.setDaemon(true);
+		return thread;
+	});
+	private final Object writeLock = new Object();
+	private final Object fileLock = new Object();
+	private Snapshot pending;
+	private boolean writerBusy;
+	private long revision;
+	private long written;
 
 	public RecordStore(Path path) {
 		this.path = path;
@@ -52,23 +69,77 @@ public final class RecordStore {
 		}
 	}
 
-	public synchronized void save() {
+	// 调用方多在服务器主线程上，这里只生成内容，写盘交给后台线程，连续多次保存只写最新一份。
+	public void save() {
+		Snapshot snapshot = snapshot();
+		synchronized (writeLock) {
+			pending = snapshot;
+			if (writerBusy) {
+				return;
+			}
+			writerBusy = true;
+		}
+		try {
+			WRITER.execute(this::drain);
+		} catch (RuntimeException e) {
+			synchronized (writeLock) {
+				writerBusy = false;
+			}
+			flush();
+		}
+	}
+
+	// 关服时用，当前线程直接写完再返回。
+	public void flush() {
+		Snapshot snapshot = snapshot();
+		synchronized (writeLock) {
+			pending = null;
+		}
+		write(snapshot);
+	}
+
+	private synchronized Snapshot snapshot() {
 		JsonObject root = new JsonObject();
 		root.add("fakePlayers", copy(fakePlayers));
 		root.add("logouts", copy(logouts));
 		root.add("snapshots", copy(snapshots));
 		root.add("deaths", copy(deaths));
-		try {
-			Files.createDirectories(path.getParent());
-			Path tmp = path.resolveSibling(path.getFileName() + ".tmp");
-			Files.writeString(tmp, GSON.toJson(root), StandardCharsets.UTF_8);
-			try {
-				Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-			} catch (AtomicMoveNotSupportedException e) {
-				Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
+		return new Snapshot(++revision, GSON.toJson(root));
+	}
+
+	private void drain() {
+		while (true) {
+			Snapshot next;
+			synchronized (writeLock) {
+				next = pending;
+				pending = null;
+				if (next == null) {
+					writerBusy = false;
+					return;
+				}
 			}
-		} catch (IOException e) {
-			com.sgu.bridge.SguBridge.LOGGER.warn("保存记录失败", e);
+			write(next);
+		}
+	}
+
+	private void write(Snapshot snapshot) {
+		synchronized (fileLock) {
+			if (snapshot.revision <= written) {
+				return;
+			}
+			try {
+				Files.createDirectories(path.getParent());
+				Path tmp = path.resolveSibling(path.getFileName() + ".tmp");
+				Files.writeString(tmp, snapshot.json, StandardCharsets.UTF_8);
+				try {
+					Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+				} catch (AtomicMoveNotSupportedException e) {
+					Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
+				}
+				written = snapshot.revision;
+			} catch (IOException e) {
+				com.sgu.bridge.SguBridge.LOGGER.warn("保存记录失败", e);
+			}
 		}
 	}
 
@@ -84,6 +155,8 @@ public final class RecordStore {
 		row.addProperty("z", z);
 		row.addProperty("summonedAt", now());
 		row.addProperty("killedAt", "");
+		row.addProperty("actorName", "");
+		row.addProperty("actorSource", "");
 		row.addProperty("online", true);
 		row.addProperty("shadow", shadow);
 		save();
@@ -107,6 +180,8 @@ public final class RecordStore {
 		row.addProperty("summonerSource", "unknown");
 		row.addProperty("summonedAt", "");
 		row.addProperty("killedAt", "");
+		row.addProperty("actorName", "");
+		row.addProperty("actorSource", "");
 		row.addProperty("online", true);
 		row.addProperty("shadow", false);
 		fillLive(row, player);
@@ -114,23 +189,104 @@ public final class RecordStore {
 		save();
 	}
 
-	public synchronized void markFakeOffline(String name, String time) {
-		JsonObject row = find(fakePlayers, name);
-		if (row == null) {
+	public void setStopping(boolean stopping) {
+		this.stopping = stopping;
+	}
+
+	public synchronized void noteLogoutActor(String playerName, String actorName, String actorSource) {
+		if (playerName == null || playerName.isBlank()) {
 			return;
 		}
-		row.addProperty("online", false);
-		if (!row.has("killedAt") || row.get("killedAt").getAsString().isEmpty()) {
-			row.addProperty("killedAt", time);
+		String key = playerName.toLowerCase(Locale.ROOT);
+		PendingActor existing = pendingActors.get(key);
+		if (existing != null && !existing.expired()) {
+			return;
 		}
+		String name = actorName == null ? "" : actorName.strip();
+		if (name.length() > 64) {
+			name = name.substring(0, 64);
+		}
+		if (name.isEmpty()) {
+			return;
+		}
+		pendingActors.put(key, new PendingActor(name, actorSource == null ? "" : actorSource, System.nanoTime()));
+	}
+
+	public synchronized void rememberLogout(ServerPlayer player, String fallbackName, String fallbackSource) {
+		String name = player.getGameProfile().name();
+		if (!FakePlayers.isFake(player)) {
+			noteLogoutActor(name, fallbackName, fallbackSource);
+			return;
+		}
+		JsonObject row = find(fakePlayers, name);
+		if (row == null) {
+			row = new JsonObject();
+			row.addProperty("name", name);
+			row.addProperty("uuid", player.getUUID().toString());
+			row.addProperty("summonerName", "未知");
+			row.addProperty("summonerUuid", "");
+			row.addProperty("summonerSource", "unknown");
+			row.addProperty("summonedAt", "");
+			row.addProperty("shadow", false);
+			row.addProperty("online", true);
+			fakePlayers.add(row);
+		}
+		PendingActor pending = consumeActor(name);
+		String actorName = pending != null ? pending.name : fallbackName;
+		String actorSource = pending != null ? pending.source : fallbackSource;
+		if ((pending != null || text(row, "actorName").isEmpty()) && actorName != null && !actorName.isBlank()) {
+			row.addProperty("actorName", actorName.strip());
+			row.addProperty("actorSource", actorSource == null ? "" : actorSource);
+		}
+		if (text(row, "killedAt").isEmpty()) {
+			row.addProperty("killedAt", now());
+		}
+		fillLive(row, player);
 		save();
+	}
+
+	public synchronized void markFakeOffline(ServerPlayer player, String time) {
+		String name = player.getGameProfile().name();
+		JsonObject row = find(fakePlayers, name);
+		if (row == null) {
+			row = new JsonObject();
+			row.addProperty("name", name);
+			row.addProperty("uuid", player.getUUID().toString());
+			row.addProperty("summonerName", "未知");
+			row.addProperty("summonerUuid", "");
+			row.addProperty("summonerSource", "unknown");
+			row.addProperty("summonedAt", "");
+			row.addProperty("shadow", false);
+			fakePlayers.add(row);
+		}
+		row.addProperty("online", false);
+		row.addProperty("killedAt", time);
+		fillLive(row, player);
+		writeActor(row, name, "", "");
+		save();
+	}
+
+	public synchronized boolean touchFake(ServerPlayer player) {
+		JsonObject row = find(fakePlayers, player.getGameProfile().name());
+		if (row == null || !flag(row, "online")) {
+			return false;
+		}
+		if (samePlace(row, player)) {
+			return false;
+		}
+		fillLive(row, player);
+		return true;
 	}
 
 	public synchronized void recordLogout(ServerPlayer player) {
 		String time = now();
-		JsonObject row = place(findOrCreate(logouts, player.getGameProfile().name()), player, time);
+		String name = player.getGameProfile().name();
+		JsonObject row = place(findOrCreate(logouts, name), player, time);
 		row.addProperty("kind", "logout");
-		place(findOrCreate(snapshots, player.getGameProfile().name()), player, time);
+		row.remove("actorName");
+		row.remove("actorSource");
+		writeActor(row, name, name, "self");
+		place(findOrCreate(snapshots, name), player, time);
 		save();
 	}
 
@@ -152,7 +308,7 @@ public final class RecordStore {
 	public synchronized JsonArray listFake(net.minecraft.server.MinecraftServer server) {
 		JsonArray array = new JsonArray();
 		List<JsonObject> rows = new ArrayList<>(fakePlayers);
-		rows.sort(Comparator.comparing((JsonObject row) -> !row.get("online").getAsBoolean()).thenComparing(row -> text(row, "name")));
+		rows.sort(Comparator.comparing((JsonObject row) -> !flag(row, "online")).thenComparing(row -> text(row, "name")));
 		for (JsonObject stored : rows) {
 			JsonObject copy = stored.deepCopy();
 			String name = text(copy, "name");
@@ -169,22 +325,45 @@ public final class RecordStore {
 		return array;
 	}
 
-	public synchronized JsonObject queryLogout(String name, boolean online) {
+	public synchronized JsonObject queryLogout(net.minecraft.server.MinecraftServer server, String name) {
+		JsonObject fake = find(fakePlayers, name);
+		if (fake != null) {
+			JsonObject copy = fake.deepCopy();
+			copy.addProperty("fake", true);
+			String storedName = text(copy, "name");
+			ServerPlayer live = server.getPlayerList().getPlayerByName(storedName);
+			if (live != null && FakePlayers.isFake(live)) {
+				fillLive(copy, live);
+				copy.addProperty("online", true);
+				copy.addProperty("kind", "online");
+				copy.addProperty("time", text(copy, "summonedAt"));
+				return copy;
+			}
+			copy.addProperty("online", false);
+			String killedAt = text(copy, "killedAt");
+			copy.addProperty("kind", killedAt.isEmpty() ? "last_known" : "logout");
+			copy.addProperty("time", killedAt.isEmpty() ? text(copy, "summonedAt") : killedAt);
+			return copy;
+		}
+		boolean online = playerOnline(server, name);
 		JsonObject logout = find(logouts, name);
 		JsonObject snapshot = find(snapshots, name);
+		JsonObject row;
 		if (online) {
-			return logout == null ? null : withKind(logout, "logout");
+			row = logout == null ? null : withKind(logout, "logout");
+		} else if (logout == null && snapshot == null) {
+			row = null;
+		} else if (logout == null) {
+			row = withKind(snapshot, "last_known");
+		} else if (snapshot != null && text(snapshot, "time").compareTo(text(logout, "time")) > 0) {
+			row = withKind(snapshot, "last_known");
+		} else {
+			row = withKind(logout, "logout");
 		}
-		if (logout == null && snapshot == null) {
-			return null;
+		if (row != null) {
+			row.addProperty("fake", false);
 		}
-		if (logout == null) {
-			return withKind(snapshot, "last_known");
-		}
-		if (snapshot != null && text(snapshot, "time").compareTo(text(logout, "time")) > 0) {
-			return withKind(snapshot, "last_known");
-		}
-		return withKind(logout, "logout");
+		return row;
 	}
 
 	public synchronized JsonObject queryDeath(String name) {
@@ -211,7 +390,10 @@ public final class RecordStore {
 				return online.getGameProfile().name();
 			}
 		}
-		JsonObject found = find(logouts, name);
+		JsonObject found = find(fakePlayers, name);
+		if (found == null) {
+			found = find(logouts, name);
+		}
 		if (found == null) {
 			found = find(deaths, name);
 		}
@@ -223,6 +405,34 @@ public final class RecordStore {
 
 	public static String now() {
 		return OffsetDateTime.now().toString();
+	}
+
+	private void writeActor(JsonObject row, String playerName, String fallbackName, String fallbackSource) {
+		if (!text(row, "actorName").isEmpty()) {
+			pendingActors.remove(playerName.toLowerCase(Locale.ROOT));
+			return;
+		}
+		PendingActor actor = consumeActor(playerName);
+		if (actor == null && stopping) {
+			row.addProperty("actorName", "服务器关闭");
+			row.addProperty("actorSource", "server");
+			return;
+		}
+		if (actor == null) {
+			row.addProperty("actorName", fallbackName);
+			row.addProperty("actorSource", fallbackSource);
+			return;
+		}
+		row.addProperty("actorName", actor.name);
+		row.addProperty("actorSource", actor.source);
+	}
+
+	private PendingActor consumeActor(String playerName) {
+		PendingActor actor = pendingActors.remove(playerName.toLowerCase(Locale.ROOT));
+		if (actor == null || actor.expired()) {
+			return null;
+		}
+		return actor;
 	}
 
 	private static JsonObject withKind(JsonObject row, String kind) {
@@ -282,7 +492,13 @@ public final class RecordStore {
 	}
 
 	private static String text(JsonObject row, String key) {
-		return row.has(key) && !row.get(key).isJsonNull() ? row.get(key).getAsString() : "";
+		var value = row.get(key);
+		return value != null && value.isJsonPrimitive() ? value.getAsString() : "";
+	}
+
+	private static boolean flag(JsonObject row, String key) {
+		var value = row.get(key);
+		return value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isBoolean() && value.getAsBoolean();
 	}
 
 	private static void addAll(List<JsonObject> target, JsonObject root, String key) {
@@ -293,6 +509,34 @@ public final class RecordStore {
 			if (element.isJsonObject()) {
 				target.add(element.getAsJsonObject());
 			}
+		}
+	}
+
+	private static final class Snapshot {
+		private final long revision;
+		private final String json;
+
+		private Snapshot(long revision, String json) {
+			this.revision = revision;
+			this.json = json;
+		}
+	}
+
+	private static final class PendingActor {
+		private static final long TTL_NANOS = 15_000_000_000L;
+
+		private final String name;
+		private final String source;
+		private final long at;
+
+		private PendingActor(String name, String source, long at) {
+			this.name = name;
+			this.source = source;
+			this.at = at;
+		}
+
+		private boolean expired() {
+			return System.nanoTime() - at > TTL_NANOS;
 		}
 	}
 

@@ -3,7 +3,7 @@
 	"package": "com.sgu.bridge.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"plugin": "com.sgu.bridge.SguMixinPlugin",
-	"mixins": ["PlayerCommandMixin"],
+	"mixins": ["PlayerCommandMixin", "KickCommandMixin"],
 	"injectors": {
 		"defaultRequire": 1
 	}

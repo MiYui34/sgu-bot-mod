@@ -594,21 +594,57 @@ export async function decompressChunk(compression, payload) {
 		return payload;
 	}
 	if (compression === 4) {
-		if (payload.length < 5) {
-			throw new Error("LZ4 区块太短");
-		}
-		const size = payload.readInt32LE(0);
-		if (size <= 0 || size > 16 * 1024 * 1024) {
-			throw new Error(`LZ4 长度异常 ${size}`);
-		}
 		const { decompressBlock } = await import("lz4js");
-		const src = payload.subarray(4);
-		const dst = Buffer.alloc(size);
-		const written = decompressBlock(src, dst, 0, src.length, 0);
-		if (written !== undefined && written < 0) {
-			throw new Error("LZ4 解压失败");
-		}
-		return dst;
+		return decodeLz4Block(payload, decompressBlock);
 	}
 	throw new Error(`不支持的压缩类型 ${compression}`);
+}
+
+const LZ4_MAGIC = "LZ4Block";
+const LZ4_HEADER = 21;
+const LZ4_RAW = 0x10;
+const LZ4_COMPRESSED = 0x20;
+const LZ4_LIMIT = 16 * 1024 * 1024;
+
+// 原版用 lz4-java 的 LZ4BlockOutputStream：每块是 "LZ4Block"、方式、压缩长度、原长、校验，最后一块两个长度都是 0。
+export function decodeLz4Block(payload, decompressBlock) {
+	const buffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+	const parts = [];
+	let total = 0;
+	let offset = 0;
+	while (offset < buffer.length) {
+		if (offset + LZ4_HEADER > buffer.length || buffer.toString("latin1", offset, offset + 8) !== LZ4_MAGIC) {
+			throw new Error("LZ4 区块头不对");
+		}
+		const method = buffer[offset + 8] & 0xf0;
+		const compressed = buffer.readInt32LE(offset + 9);
+		const original = buffer.readInt32LE(offset + 13);
+		offset += LZ4_HEADER;
+		if (compressed === 0 && original === 0) {
+			break;
+		}
+		if (compressed <= 0 || original <= 0 || offset + compressed > buffer.length || total + original > LZ4_LIMIT) {
+			throw new Error("LZ4 长度异常");
+		}
+		if (method === LZ4_RAW) {
+			if (compressed !== original) {
+				throw new Error("LZ4 长度异常");
+			}
+			parts.push(buffer.subarray(offset, offset + compressed));
+		} else if (method === LZ4_COMPRESSED) {
+			const out = Buffer.alloc(original);
+			if (decompressBlock(buffer, out, offset, compressed, 0) !== original) {
+				throw new Error("LZ4 解压失败");
+			}
+			parts.push(out);
+		} else {
+			throw new Error(`LZ4 压缩方式不对 ${method}`);
+		}
+		total += original;
+		offset += compressed;
+	}
+	if (total === 0) {
+		throw new Error("LZ4 区块是空的");
+	}
+	return parts.length === 1 ? Buffer.from(parts[0]) : Buffer.concat(parts, total);
 }
